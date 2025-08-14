@@ -134,6 +134,7 @@ A boot entry needs to be manually added/edited with the user's chosen key/value 
 | id=IDNAME              | Identifies boot entry for forced boot via id. Max 7 chars. |
 | logopath={FILE path}   | If it exists, it will load the specified bitmap. Otherwise `bootloader/bootlogo.bmp` will be used if exists |
 | icon={FILE path}       | Force Nyx to use the icon defined here. If this is not found, it will check for a bmp named as the boot entry ([Test 2] -> `bootloader/res/Test 2.bmp`). Otherwise defaults will be used. |
+| confirmlaunch=1        | 0: Disable, 1: Show confirmation dialog before launching this boot entry. |
 | ofw=1                  | Reboots directly into 100% stock OFW via REBOOT_BYPASS_FUSES, bypassing Hekate/emuMMC/cowMMC boot processing. |
 
 

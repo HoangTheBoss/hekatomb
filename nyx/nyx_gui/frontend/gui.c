@@ -85,6 +85,12 @@ static jc_lv_driver_t jc_drv_ctx;
 
 gui_status_bar_ctx status_bar;
 
+typedef struct _confirm_launch_data_t
+{
+	u32 entry_idx;
+	bool is_more_cfg;
+} confirm_launch_data_t;
+
 static void _nyx_disp_init()
 {
 	vic_surface_t vic_sfc;
@@ -1120,6 +1126,20 @@ static lv_res_t _poweroff_action(lv_obj_t *btns, const char *txt)
 	return nyx_mbox_action(btns, txt);
 }
 
+static lv_res_t _confirmlaunch_action(lv_obj_t *btns, const char *txt)
+{
+	if (!lv_btnm_get_pressed(btns))
+	{
+		lv_obj_t *mbox = lv_obj_get_parent(btns);
+		confirm_launch_data_t *data = (confirm_launch_data_t *)lv_obj_get_free_ptr(mbox);
+
+		if (data)
+			_launch_hos(data->entry_idx, data->is_more_cfg ? 1 : 0);
+	}
+
+	return nyx_mbox_action(btns, txt);
+}
+
 static lv_res_t _create_mbox_reload(lv_obj_t *btn)
 {
 	lv_obj_t *dark_bg = lv_obj_create(lv_scr_act(), NULL);
@@ -1187,6 +1207,35 @@ static lv_res_t _create_mbox_poweroff(lv_obj_t *btn)
 	lv_mbox_set_text(mbox, "#FF8000 Do you really want#\n#FF8000 to power off?#");
 
 	lv_mbox_add_btns(mbox, mbox_btn_map, _poweroff_action);
+
+	lv_obj_align(mbox, NULL, LV_ALIGN_CENTER, 0, 0);
+	lv_obj_set_top(mbox, true);
+
+	return LV_RES_OK;
+}
+
+static lv_res_t _create_mbox_confirmlaunch(const char *btn_name, u32 entry_idx, bool is_more_cfg)
+{
+	lv_obj_t *dark_bg = lv_obj_create(lv_scr_act(), NULL);
+	lv_obj_set_style(dark_bg, &mbox_darken);
+	lv_obj_set_size(dark_bg, LV_HOR_RES, LV_VER_RES);
+
+	static const char *mbox_btn_map[] = { "\221Yes", "\221No", "" };
+	lv_obj_t *mbox = lv_mbox_create(dark_bg, NULL);
+	lv_mbox_set_recolor_text(mbox, true);
+	lv_obj_set_width(mbox, LV_HOR_RES * 4 / 10);
+
+	char confirm_message[256];
+	s_printf(confirm_message,
+		"Are you sure you would like to launch\n#FF8000 %.128s#?",
+		btn_name);
+	lv_mbox_set_text(mbox, confirm_message);
+	lv_mbox_add_btns(mbox, mbox_btn_map, _confirmlaunch_action);
+
+	static confirm_launch_data_t launch_data;
+	launch_data.entry_idx = entry_idx;
+	launch_data.is_more_cfg = is_more_cfg;
+	lv_obj_set_free_ptr(mbox, &launch_data);
 
 	lv_obj_align(mbox, NULL, LV_ALIGN_CENTER, 0, 0);
 	lv_obj_set_top(mbox, true);
@@ -1517,10 +1566,35 @@ typedef struct _launch_menu_entries_t
 static launch_menu_entries_t launch_ctxt;
 static lv_obj_t *launch_bg = NULL;
 static bool launch_bg_done = false;
+static bool confirm_launch_map[2][21] = {0};
+static char *entry_name_map[2][21] = {0};
+
+static void _clear_confirm_launch_maps(void)
+{
+	for (u32 m = 0; m < 2; m++)
+	{
+		for (u32 i = 0; i < 21; i++)
+		{
+			if (entry_name_map[m][i])
+			{
+				free(entry_name_map[m][i]);
+				entry_name_map[m][i] = NULL;
+			}
+			confirm_launch_map[m][i] = false;
+		}
+	}
+}
 
 static lv_res_t _launch_more_cfg_action(lv_obj_t *btn)
 {
 	lv_btn_ext_t *ext = lv_obj_get_ext_attr(btn);
+
+	// Check if confirm launch is enabled for this entry.
+	if (ext->idx < 21 && confirm_launch_map[1][ext->idx] && entry_name_map[1][ext->idx])
+	{
+		_create_mbox_confirmlaunch(entry_name_map[1][ext->idx], ext->idx, true);
+		return LV_RES_OK;
+	}
 
 	_launch_hos(ext->idx, 1);
 
@@ -1547,6 +1621,7 @@ static lv_res_t _win_launch_close_action(lv_obj_t * btn)
 				free(src);
 		}
 	}
+	_clear_confirm_launch_maps();
 
 	lv_obj_t * win = lv_win_get_from_btn(btn);
 
@@ -1606,6 +1681,13 @@ static lv_obj_t *create_window_launch(const char *win_title)
 static lv_res_t _launch_action(lv_obj_t *btn)
 {
 	lv_btn_ext_t *ext = lv_obj_get_ext_attr(btn);
+
+	// Check if confirm launch is enabled for this entry.
+	if (ext->idx < 21 && confirm_launch_map[0][ext->idx] && entry_name_map[0][ext->idx])
+	{
+		_create_mbox_confirmlaunch(entry_name_map[0][ext->idx], ext->idx, false);
+		return LV_RES_OK;
+	}
 
 	_launch_hos(ext->idx, 0);
 
@@ -1785,6 +1867,7 @@ static lv_res_t _create_window_home_launch(lv_obj_t *btn)
 	img_style.image.intense = LV_OPA_COVER;
 
 	// Parse ini boot entries and set buttons/icons.
+	_clear_confirm_launch_maps();
 	char *tmp_path = malloc(1024);
 	u32 curr_btn_idx = 0; // Active buttons.
 	LIST_INIT(ini_sections);
@@ -1825,16 +1908,19 @@ ini_parsing:
 		bool payload = false;
 		bool img_colorize = false;
 		bool img_noborder = false;
+		bool confirm_launch = false;
 		lv_img_dsc_t *bmp = NULL;
 		lv_obj_t *img = NULL;
 
-		// Check for icons.
+		// Check for icons, payload, and confirm launch.
 		LIST_FOREACH_ENTRY(ini_kv_t, kv, &ini_sec->kvs, link)
 		{
 			if (!strcmp("icon", kv->key))
 				icon_path = kv->val;
 			else if (!strcmp("payload", kv->key))
 				payload = true;
+			else if (!strcmp("confirmlaunch", kv->key))
+				confirm_launch = (atoi(kv->val) == 1);
 		}
 
 		// If icon not found, check res folder for section_name.bmp.
@@ -1970,6 +2056,19 @@ ini_parsing:
 		// Set button's label text.
 		lv_label_set_text(launch_ctxt.label[curr_btn_idx], ini_sec->name);
 		lv_obj_set_opa_scale(launch_ctxt.label[curr_btn_idx], LV_OPA_COVER);
+
+		// Store confirm launch state per menu scope.
+		if (entry_idx < 21)
+		{
+			u32 map_idx = more_cfg ? 1 : 0;
+			confirm_launch_map[map_idx][entry_idx] = confirm_launch;
+			if (confirm_launch)
+			{
+				entry_name_map[map_idx][entry_idx] = malloc(strlen(ini_sec->name) + 1);
+				if (entry_name_map[map_idx][entry_idx])
+					strcpy(entry_name_map[map_idx][entry_idx], ini_sec->name);
+			}
+		}
 
 		// Set rolling text if name is too big.
 		int max_label_size = 238 - (n_cfg.entries_5_col ? 12 : 0);
