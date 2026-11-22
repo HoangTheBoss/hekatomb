@@ -140,6 +140,12 @@ void emummc_load_cfg()
 			}
 		}
 	}
+	else if (!f_stat("emuMMC/COW0/cow_autoinit", NULL))
+	{
+		// First-boot zero-PC auto-init fallback when emuMMC/emummc.ini does not exist yet.
+		static char s_cow_default_path[] = "emuMMC/COW0";
+		emummc_set_path(s_cow_default_path);
+	}
 }
 
 bool emummc_set_path(char *path)
