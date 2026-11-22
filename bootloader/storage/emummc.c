@@ -21,7 +21,78 @@
 
 #include "emummc.h"
 #include "../config.h"
+#include <ianos/ianos.h>
 #include <libs/fatfs/ff.h>
+#include <storage/cow_bso.h>
+
+static cow_bso_ctx_t s_cow_ctx = { 0 };
+static char s_cow_base_path[0x200];
+
+static bool _cow_overlay_requires_bso(const char *base_path)
+{
+	char fpath[0x240];
+	strcpy(fpath, base_path);
+	strcat(fpath, "/eMMC/00");
+
+	FIL fp;
+	if (f_open(&fp, fpath, FA_READ) != FR_OK)
+	{
+		strcpy(fpath, base_path);
+		strcat(fpath, "/cow_autoinit");
+		return (f_stat(fpath, NULL) == FR_OK);
+	}
+
+	bool found = false;
+	for (u32 slot = 0U; slot < 2U; slot++)
+	{
+		u32 magic = 0U;
+		UINT br = 0U;
+		FSIZE_t off = (FSIZE_t)(0x2000000ULL + ((u64)slot * 0x4000ULL));
+		if (f_lseek(&fp, off) == FR_OK && f_read(&fp, &magic, sizeof(magic), &br) == FR_OK &&
+		    br == sizeof(magic) && magic == 0x30574F43U)
+		{
+			found = true;
+			break;
+		}
+	}
+	f_close(&fp);
+	return found;
+}
+
+static void _cow_bind_ops(const char *base_path)
+{
+	s_cow_ctx.api_magic                        = COW_BSO_MAGIC;
+	s_cow_ctx.active                           = 0U;
+	s_cow_ctx.rc                               = 0U;
+	s_cow_ctx.force_disable                    = (u32)h_cfg.emummc_force_disable;
+	s_cow_ctx.emu_id                           = emu_cfg.id;
+	strncpy(s_cow_base_path, base_path ? base_path : "", sizeof(s_cow_base_path) - 1U);
+	s_cow_base_path[sizeof(s_cow_base_path) - 1U] = 0;
+	s_cow_ctx.base_path                        = s_cow_base_path;
+	s_cow_ctx.emmc_storage                     = &emmc_storage;
+	s_cow_ctx.fn_emmc_set_partition            = emmc_set_partition;
+	s_cow_ctx.fn_sdmmc_storage_read            = sdmmc_storage_read;
+	s_cow_ctx.fn_f_open                        = f_open;
+	s_cow_ctx.fn_f_close                       = f_close;
+	s_cow_ctx.fn_f_read                        = f_read;
+	s_cow_ctx.fn_f_write                       = f_write;
+	s_cow_ctx.fn_f_lseek                       = f_lseek;
+	s_cow_ctx.fn_f_sync                        = f_sync;
+	s_cow_ctx.fn_f_stat                        = f_stat;
+	s_cow_ctx.fn_f_mkdir                       = f_mkdir;
+	s_cow_ctx.fn_f_unlink                      = f_unlink;
+	s_cow_ctx.fn_f_rename                      = f_rename;
+	s_cow_ctx.fn_f_getfree                     = f_getfree;
+	s_cow_ctx.fn_se_sha_hash_256_oneshot       = se_sha_hash_256_oneshot;
+	s_cow_ctx.fn_se_sha_hash_256_partial_start = se_sha_hash_256_partial_start;
+	s_cow_ctx.fn_se_sha_hash_256_partial_update = se_sha_hash_256_partial_update;
+	s_cow_ctx.fn_se_sha_hash_256_partial_end   = se_sha_hash_256_partial_end;
+	s_cow_ctx.fn_crc32_calc                    = crc32_calc;
+	s_cow_ctx.fn_gfx_printf                    = gfx_printf;
+	s_cow_ctx.fn_malloc                        = malloc;
+	s_cow_ctx.fn_zalloc                        = zalloc;
+	s_cow_ctx.fn_free                          = free;
+}
 
 emummc_cfg_t emu_cfg = { 0 };
 
@@ -97,6 +168,18 @@ bool emummc_set_path(char *path)
 
 			found = true;
 		}
+		else
+		{
+			strcpy(emu_cfg.emummc_file_based_path, path);
+			strcat(emu_cfg.emummc_file_based_path, "/cow_autoinit");
+			if (!f_stat(emu_cfg.emummc_file_based_path, NULL))
+			{
+				emu_cfg.sector = 0;
+				emu_cfg.path = path;
+
+				found = true;
+			}
+		}
 	}
 
 	if (found)
@@ -135,6 +218,7 @@ int emummc_storage_init_mmc()
 {
 	FILINFO fno;
 	emu_cfg.active_part = 0;
+	s_cow_ctx.active = 0U;
 
 	// Always init eMMC even when in emuMMC. eMMC is needed from the emuMMC driver anyway.
 	if (emmc_initialize(false))
@@ -148,6 +232,25 @@ int emummc_storage_init_mmc()
 
 	if (!emu_cfg.sector)
 	{
+		_cow_bind_ops(emu_cfg.path);
+		if (s_cow_ctx.loaded && s_cow_ctx.fn_run_init)
+			s_cow_ctx.fn_run_init(&s_cow_ctx);
+		else
+			ianos_static_module("bootloader/sys/libsys_cow.bso", &s_cow_ctx);
+
+		if (!s_cow_ctx.loaded)
+		{
+			if (_cow_overlay_requires_bso(emu_cfg.path))
+			{
+				EPRINTF("Missing bootloader/sys/libsys_cow.bso!");
+				goto out;
+			}
+		}
+		else if (s_cow_ctx.rc)
+		{
+			goto out;
+		}
+
 		strcpy(emu_cfg.emummc_file_based_path, emu_cfg.path);
 		strcat(emu_cfg.emummc_file_based_path, "/eMMC");
 
@@ -196,6 +299,9 @@ int emummc_storage_read(u32 sector, u32 num_sectors, void *buf)
 	}
 	else
 	{
+		if (!emu_cfg.active_part && s_cow_ctx.active && s_cow_ctx.fn_read_gpp)
+			return s_cow_ctx.fn_read_gpp(sector, num_sectors, buf);
+
 		if (!emu_cfg.active_part)
 		{
 			u32 file_part = sector / emu_cfg.file_based_part_size;
@@ -239,6 +345,9 @@ int emummc_storage_write(u32 sector, u32 num_sectors, void *buf)
 	}
 	else
 	{
+		if (!emu_cfg.active_part && s_cow_ctx.active)
+			return 1;
+
 		if (!emu_cfg.active_part)
 		{
 			u32 file_part = sector / emu_cfg.file_based_part_size;
