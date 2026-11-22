@@ -20,6 +20,7 @@
 
 #include "gui.h"
 #include "fe_emummc_tools.h"
+#include "gui_cow_tools.h"
 #include "gui_tools_partition_manager.h"
 #include <libs/fatfs/ff.h>
 
@@ -1061,6 +1062,11 @@ lv_res_t create_win_emummc_tools(lv_obj_t *btn)
 	emummc_cfg_t emu_info;
 	load_emummc_cfg(&emu_info);
 
+	char *cow_summary = (char *)zalloc(SZ_1K);
+	bool has_cow_summary = false;
+	if (cow_summary && emu_info.enabled && !emu_info.sector && emu_info.path)
+		has_cow_summary = gui_cow_format_active_summary(emu_info.path, cow_summary, SZ_1K);
+
 	sd_unmount();
 
 	static lv_style_t h_style;
@@ -1107,8 +1113,9 @@ lv_res_t create_win_emummc_tools(lv_obj_t *btn)
 			s_printf(txt_buf, "#00DDFF Type:# SD Raw Partition\n#00DDFF Sector:# 0x%08X\n#00DDFF Nintendo folder:# %s\n",
 				emu_info.sector, emu_info.nintendo_path ? emu_info.nintendo_path : "");
 		else
-			s_printf(txt_buf, "#00DDFF Type:# SD File\n#00DDFF Base folder:# %s\n#00DDFF Nintendo folder:# %s\n",
-				emu_info.path ? emu_info.path : "", emu_info.nintendo_path ? emu_info.nintendo_path : "");
+			s_printf(txt_buf, "#00DDFF Type:# SD File\n#00DDFF Base folder:# %s\n#00DDFF Nintendo folder:# %s\n%s",
+				emu_info.path ? emu_info.path : "", emu_info.nintendo_path ? emu_info.nintendo_path : "",
+				(has_cow_summary && cow_summary) ? cow_summary : "");
 
 		lv_label_set_text(label_txt2, txt_buf);
 	}
@@ -1116,6 +1123,8 @@ lv_res_t create_win_emummc_tools(lv_obj_t *btn)
 	{
 		lv_label_set_static_text(label_txt2, "emuMMC is disabled and eMMC will be used for boot.\n\n\n");
 	}
+	if (cow_summary)
+		free(cow_summary);
 
 	if (emu_info.path)
 		free(emu_info.path);
@@ -1195,6 +1204,23 @@ lv_res_t create_win_emummc_tools(lv_obj_t *btn)
 		"Migrate a backup to a #C7EA46 SD File emuMMC# or repair an existing\n#C7EA46 SD Raw Partition emuMMC#.\n");
 	lv_obj_set_style(label_txt4, &hint_small_style);
 	lv_obj_align(label_txt4, btn4, LV_ALIGN_OUT_BOTTOM_LEFT, 0, LV_DPI / 3);
+
+	// Alternative Experimental cowMMC Overlay button (non-replacing).
+	lv_obj_t *btn5 = lv_btn_create(h2, btn2);
+	label_btn = lv_label_create(btn5, NULL);
+	lv_label_set_static_text(label_btn, SYMBOL_MODULES"  cowMMC (Exp)");
+	lv_obj_align(btn5, label_txt4, LV_ALIGN_OUT_BOTTOM_LEFT, 0, LV_DPI / 2);
+	lv_btn_set_action(btn5, LV_BTN_ACTION_CLICK, create_win_cow_tools);
+
+	lv_obj_t *label_txt5 = lv_label_create(h2, NULL);
+	lv_label_set_recolor(label_txt5, true);
+	lv_label_set_static_text(label_txt5,
+		"Experimental sparse #FFDD00 Copy-on-Write# cowMMC setup, USER\n"
+		"expansion, base digest verification, and SD-headroom ballooning.\n");
+	lv_obj_set_style(label_txt5, &hint_small_style);
+	lv_obj_align(label_txt5, btn5, LV_ALIGN_OUT_BOTTOM_LEFT, 0, LV_DPI / 3);
+
+	gui_cow_set_parent_window(win, create_win_emummc_tools);
 
 	return LV_RES_OK;
 }
