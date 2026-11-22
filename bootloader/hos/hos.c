@@ -710,6 +710,16 @@ void hos_launch(ini_sec_t *cfg)
 	launch_ctxt_t ctxt = {0};
 	tsec_ctxt_t tsec_ctxt = {0};
 
+	// Direct 100% stock OFW reboot before touching eMMC/emuMMC/cowMMC pre-boot hooks.
+	if (cfg)
+	{
+		LIST_FOREACH_ENTRY(ini_kv_t, kv, &cfg->kvs, link)
+		{
+			if (!strcmp("ofw", kv->key) && kv->val[0] == '1')
+				power_set_state(REBOOT_BYPASS_FUSES);
+		}
+	}
+
 	minerva_change_freq(FREQ_1600);
 	list_init(&ctxt.kip1_list);
 
