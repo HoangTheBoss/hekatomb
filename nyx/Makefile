@@ -28,7 +28,7 @@ TRACK_LDFLAGS = $(BUILDDIR)/.ldflags
 
 # Main and graphics.
 OBJS =  start exception_handlers nyx heap gfx \
-		gui gui_info gui_tools gui_options gui_emmc_tools gui_emummc_tools cow_nyx_core gui_tools_partition_manager \
+		gui gui_info gui_tools gui_options gui_emmc_tools gui_emummc_tools gui_cow_tools cow_nyx_core gui_tools_partition_manager \
 		fe_emummc_tools fe_emmc_tools
 
 # Hardware.
