@@ -15,7 +15,36 @@
 
 #ifdef COW_BSO_MODULE
 
+#define COW_CLR_DEF                  0xFFCCCCCCU
+#define COW_CLR_CYAN                 0xFF00CCFFU
+#define COW_CLR_GREEN                0xFF96FF00U
+#define COW_CLR_WARN                 0xFFFFDD00U
+#define COW_CLR_ERR                  0xFFFF0000U
+
 static cow_bso_ctx_t *g_ops = NULL;
+static bdk_params_t *g_bdk = NULL;
+
+typedef struct __cow_bdk_gfx_ctxt_t
+{
+	u32 *fb;
+	u32 width;
+	u32 height;
+	u32 stride;
+} _cow_bdk_gfx_ctxt_t;
+
+typedef struct __cow_bdk_gfx_con_t
+{
+	_cow_bdk_gfx_ctxt_t *gfx_ctxt;
+	u32 fntsz;
+	u32 x;
+	u32 y;
+	u32 savedx;
+	u32 savedy;
+	u32 fgcol;
+	int fillbg;
+	u32 bgcol;
+	bool mute;
+} _cow_bdk_gfx_con_t;
 
 void *memcpy(void *dst, const void *src, size_t n)
 {
@@ -149,9 +178,78 @@ static char *_cow_strrchr(const char *s, int c)
 #define malloc(a)                            g_ops->fn_malloc((a))
 #define zalloc(a)                            g_ops->fn_zalloc((a))
 #define free(a)                              g_ops->fn_free((a))
-#define EPRINTF(text)                        gfx_printf("ERR: " text "\n")
-#define EPRINTFARGS(text, ...)               gfx_printf("ERR: " text "\n", __VA_ARGS__)
-#define WPRINTF(text)                        gfx_printf("WARN: " text "\n")
+static void _cow_bso_ui_show(bool clr)
+{
+	if (g_ops && g_ops->api_magic == COW_BSO_MAGIC_V2 && g_ops->fn_gfx_show_console)
+	{
+		g_ops->fn_gfx_show_console(clr);
+		return;
+	}
+	if (g_bdk && g_bdk->gfx_con)
+	{
+		_cow_bdk_gfx_con_t *con = (_cow_bdk_gfx_con_t *)g_bdk->gfx_con;
+		_cow_bdk_gfx_ctxt_t *ctx = (_cow_bdk_gfx_ctxt_t *)g_bdk->gfx_ctx;
+		bool was_muted = con->mute;
+		con->mute = false;
+		con->fntsz = 16U;
+		con->fgcol = COW_CLR_DEF;
+		con->fillbg = 1;
+		con->bgcol = 0xFF1B1B1BU;
+		if ((clr || was_muted) && ctx && ctx->fb)
+		{
+			memset(ctx->fb, 0x1B, (size_t)ctx->width * (size_t)ctx->height * 4U);
+			con->x = 0U;
+			con->y = 0U;
+		}
+	}
+}
+
+static void _cow_bso_ui_getpos(u32 *px, u32 *py)
+{
+	if (g_ops && g_ops->api_magic == COW_BSO_MAGIC_V2 && g_ops->fn_gfx_con_getpos)
+	{
+		g_ops->fn_gfx_con_getpos(px, py);
+		return;
+	}
+	if (g_bdk && g_bdk->gfx_con)
+	{
+		_cow_bdk_gfx_con_t *con = (_cow_bdk_gfx_con_t *)g_bdk->gfx_con;
+		*px = con->x;
+		*py = con->y;
+		return;
+	}
+	*px = 0U;
+	*py = 0U;
+}
+
+static void _cow_bso_ui_setpos(u32 x, u32 y)
+{
+	if (g_ops && g_ops->api_magic == COW_BSO_MAGIC_V2 && g_ops->fn_gfx_con_setpos)
+	{
+		g_ops->fn_gfx_con_setpos(x, y);
+		return;
+	}
+	if (g_bdk && g_bdk->gfx_con)
+	{
+		_cow_bdk_gfx_con_t *con = (_cow_bdk_gfx_con_t *)g_bdk->gfx_con;
+		con->x = x;
+		con->y = y;
+	}
+}
+
+#define cow_ui_show(clr)                     _cow_bso_ui_show((clr))
+#define cow_ui_getpos(px, py)                _cow_bso_ui_getpos((px), (py))
+#define cow_ui_setpos(x, y)                  _cow_bso_ui_setpos((x), (y))
+#define EPRINTF(text) do { \
+	cow_ui_show(false); \
+	gfx_printf("%kERR: " text "%k\n", COW_CLR_ERR, COW_CLR_DEF); \
+} while (0)
+#define EPRINTFARGS(text, ...) do { \
+	cow_ui_show(false); \
+	gfx_printf("%kERR: " text "%k\n", COW_CLR_ERR, __VA_ARGS__, COW_CLR_DEF); \
+} while (0)
+#define WPRINTF(text) \
+	gfx_printf("%kWARN: " text "%k\n", COW_CLR_WARN, COW_CLR_DEF)
 
 #endif /* COW_BSO_MODULE */
 
@@ -202,6 +300,16 @@ static char *_cow_strrchr(const char *s, int c)
 #define COW_RAW_SNAP_MAGIC           0x52574F43U /* "COWR" */
 #define COW_RAW_SNAP_VERSION         1U
 #define COW_DEFAULT_ROLLBACK_THRESH  2U
+#define COW_SNAP_IO_BUF_BYTES        (512U * 1024U)
+#define COW_SNAP_UI_THRESH_BYTES     (8ULL * 1024ULL * 1024ULL)
+
+#ifndef COW_BSO_MODULE
+#define COW_CLR_DEF                  0xFFCCCCCCU
+#define COW_CLR_CYAN                 0xFF00CCFFU
+#define COW_CLR_GREEN                0xFF96FF00U
+#define COW_CLR_WARN                 0xFFFFDD00U
+#define COW_CLR_ERR                  0xFFFF0000U
+#endif
 
 typedef struct __attribute__((packed)) _cow_header_t
 {
@@ -867,6 +975,7 @@ static int _cow_read_and_hash_physical_base(cow_base_digests_t *out, bool copy_b
 	if (!buf)
 		return 1;
 
+	bool log_steps = copy_boot_files;
 	char fpath[0x240];
 	const char *boot0_path = NULL;
 	const char *boot1_path = NULL;
@@ -879,20 +988,36 @@ static int _cow_read_and_hash_physical_base(cow_base_digests_t *out, bool copy_b
 
 	if (copy_boot_files || compute_hashes)
 	{
+		if (log_steps)
+			gfx_printf("      BOOT0 (4 MiB)...");
 		if (_cow_read_mmc_span(1U, 0U, COW_BOOT_PART_SECTORS, buf, boot0_path))
+		{
+			if (log_steps)
+				gfx_printf(" fail\n");
 			goto fail;
+		}
 		if (compute_hashes)
 		{
 			u8 patrol_full[32];
 			if (se_sha_hash_256_oneshot(patrol_full, buf + COW_BOOT0_PATROL_OFF, COW_BOOT0_PATROL_LEN))
+			{
+				if (log_steps)
+					gfx_printf(" fail\n");
 				goto fail;
+			}
 			memcpy(out->boot0_patrol_sha256_16, patrol_full, sizeof(out->boot0_patrol_sha256_16));
 
 			memset(buf + COW_BOOT0_BCTSAVE_OFF, 0, COW_BOOT0_BCTSAVE_LEN);
 			memset(buf + COW_BOOT0_PATROL_OFF, 0, COW_BOOT0_PATROL_LEN);
 			if (se_sha_hash_256_oneshot(out->boot0_pkg1_sha256, buf, COW_BOOT_PART_BYTES))
+			{
+				if (log_steps)
+					gfx_printf(" fail\n");
 				goto fail;
+			}
 		}
+		if (log_steps)
+			gfx_printf(" ok\n");
 
 		if (copy_boot_files && emmc_dir)
 		{
@@ -900,21 +1025,43 @@ static int _cow_read_and_hash_physical_base(cow_base_digests_t *out, bool copy_b
 			strcat(fpath, "/boot1");
 			boot1_path = fpath;
 		}
+		if (log_steps)
+			gfx_printf("      BOOT1 (4 MiB)...");
 		if (_cow_read_mmc_span(2U, 0U, COW_BOOT_PART_SECTORS, buf, boot1_path))
+		{
+			if (log_steps)
+				gfx_printf(" fail\n");
 			goto fail;
+		}
 		if (compute_hashes)
 		{
 			if (se_sha_hash_256_oneshot(out->boot1_sha256, buf, COW_BOOT_PART_BYTES))
+			{
+				if (log_steps)
+					gfx_printf(" fail\n");
 				goto fail;
+			}
 		}
+		if (log_steps)
+			gfx_printf(" ok\n");
 	}
 
 	/* Read and parse GPT (LBA 0..33 = 34 sectors) from physical GPP */
+	if (log_steps)
+		gfx_printf("      GPT + BCPKG2...");
 	if (_cow_read_mmc_span(0U, 0U, 34U, buf, NULL))
+	{
+		if (log_steps)
+			gfx_printf(" fail\n");
 		goto fail;
+	}
 
 	if (compute_hashes && se_sha_hash_256_oneshot(out->gpt_sha256, buf, 34U * COW_SECTOR_SIZE))
+	{
+		if (log_steps)
+			gfx_printf(" fail\n");
 		goto fail;
+	}
 
 	gpt_t *gpt = (gpt_t *)(buf + COW_SECTOR_SIZE);
 	if (!memcmp(&gpt->header.signature, "EFI PART", 8) && gpt->header.num_part_ents <= 128U)
@@ -962,12 +1109,49 @@ static int _cow_read_and_hash_physical_base(cow_base_digests_t *out, bool copy_b
 		if (compute_hashes)
 		{
 			if (out->pkg2_valid && _cow_hash_mmc_span(0U, pkg2_start, pkg2_sects, buf, out->bcpkg2_sha256))
+			{
+				if (log_steps)
+					gfx_printf(" fail\n");
 				goto fail;
-			if (out->system_valid && _cow_hash_mmc_span(0U, sys_start, sys_sects, buf, out->system_digest_sha256))
-				goto fail;
-			if (out->user_valid && _cow_hash_mmc_span(0U, usr_start, usr_sects, buf, out->user_digest_sha256))
-				goto fail;
+			}
+			if (log_steps)
+				gfx_printf(" ok\n");
+
+			if (out->system_valid)
+			{
+				if (log_steps)
+					gfx_printf("      SYSTEM (16 MiB)...");
+				if (_cow_hash_mmc_span(0U, sys_start, sys_sects, buf, out->system_digest_sha256))
+				{
+					if (log_steps)
+						gfx_printf(" fail\n");
+					goto fail;
+				}
+				if (log_steps)
+					gfx_printf(" ok\n");
+			}
+			if (out->user_valid)
+			{
+				if (log_steps)
+					gfx_printf("      USER (16 MiB)...");
+				if (_cow_hash_mmc_span(0U, usr_start, usr_sects, buf, out->user_digest_sha256))
+				{
+					if (log_steps)
+						gfx_printf(" fail\n");
+					goto fail;
+				}
+				if (log_steps)
+					gfx_printf(" ok\n");
+			}
 		}
+		else if (log_steps)
+		{
+			gfx_printf(" ok\n");
+		}
+	}
+	else if (log_steps)
+	{
+		gfx_printf(" fail\n");
 	}
 
 	emmc_set_partition(0U);
@@ -1065,6 +1249,82 @@ static int _cow_archive_rw(const char *emmc_dir, const u64 *part_sizes, u32 num_
 	return (rem == 0U) ? 0 : 1;
 }
 
+static int _cow_prealloc_file_stepped(
+	FIL *fp,
+	u64 start_size,
+	u64 target_size,
+	const char *prefix_label,
+	int part_idx)
+{
+	if (!fp || target_size == 0ULL)
+		return 1;
+
+	u32 px = 0U, py = 0U;
+	int total_mb = (int)((target_size + (1024ULL * 1024ULL - 1ULL)) / (1024ULL * 1024ULL));
+	if (total_mb < 1)
+		total_mb = 1;
+
+	if (prefix_label)
+	{
+		cow_ui_getpos(&px, &py);
+		int init_mb = (int)(start_size >> 20);
+		int init_pct = (int)((start_size * 100ULL) / target_size);
+		if (init_pct > 100)
+			init_pct = 100;
+		gfx_printf("%s %02d: %4d / %d MiB (%3d%%)",
+			prefix_label, part_idx, init_mb, total_mb, init_pct);
+	}
+
+	const u64 step_bytes = 32ULL * 1024ULL * 1024ULL;
+	u64 end_off = target_size - 1ULL;
+	if (start_size < end_off)
+	{
+		u64 pos = start_size + step_bytes;
+		if (pos > end_off || pos < start_size)
+			pos = end_off;
+		while (pos < end_off)
+		{
+			if (f_lseek(fp, (FSIZE_t)pos) != FR_OK)
+			{
+				if (prefix_label)
+					gfx_printf("\n");
+				return 1;
+			}
+			if (prefix_label)
+			{
+				int cur_mb = (int)(pos >> 20);
+				int pct = (int)((pos * 100ULL) / target_size);
+				if (pct > 99)
+					pct = 99;
+				cow_ui_setpos(px, py);
+				gfx_printf("%s %02d: %4d / %d MiB (%3d%%)",
+					prefix_label, part_idx, cur_mb, total_mb, pct);
+			}
+			u64 next = pos + step_bytes;
+			pos = (next > end_off || next < pos) ? end_off : next;
+		}
+	}
+
+	u8 zero = 0U;
+	UINT bw = 0U;
+	if (f_lseek(fp, (FSIZE_t)end_off) != FR_OK ||
+	    f_tell(fp) != (FSIZE_t)end_off ||
+	    f_write(fp, &zero, 1U, &bw) != FR_OK || bw != 1U)
+	{
+		if (prefix_label)
+			gfx_printf("\n");
+		return 1;
+	}
+
+	if (prefix_label)
+	{
+		cow_ui_setpos(px, py);
+		gfx_printf("%s %02d: %4d / %d MiB (100%%)\n",
+			prefix_label, part_idx, total_mb, total_mb);
+	}
+	return 0;
+}
+
 static int _cow_extend_or_create_part(const char *fpath, u64 new_size, bool create_new)
 {
 	if (new_size == 0ULL || new_size > 0xFFFFFFFFULL)
@@ -1075,12 +1335,14 @@ static int _cow_extend_or_create_part(const char *fpath, u64 new_size, bool crea
 	if (f_open(&fp, fpath, mode) != FR_OK)
 		return 1;
 
+	u64 start_size = create_new ? 0ULL : (u64)f_size(&fp);
+	int pnum = 0;
+	const char *base = strrchr(fpath, '/');
+	if (base && base[1] >= '0' && base[1] <= '9' && base[2] >= '0' && base[2] <= '9')
+		pnum = (base[1] - '0') * 10 + (base[2] - '0');
+
 	bool ok = false;
-	u8 zero = 0U;
-	UINT bw = 0U;
-	if (f_lseek(&fp, (FSIZE_t)(new_size - 1ULL)) == FR_OK &&
-	    f_tell(&fp) == (FSIZE_t)(new_size - 1ULL) &&
-	    f_write(&fp, &zero, 1U, &bw) == FR_OK && bw == 1U &&
+	if (_cow_prealloc_file_stepped(&fp, start_size, new_size, "      Part", pnum) == 0 &&
 	    f_sync(&fp) == FR_OK &&
 	    f_size(&fp) == (FSIZE_t)new_size)
 	{
@@ -1347,7 +1609,7 @@ static int _cow_load_active_state(
 }
 
 __attribute__((noinline))
-static int _cow_probe_raw_snapshot(const char *snap_path, cow_raw_snap_hdr_t *out_hdr, u64 total_archive_bytes)
+static int _cow_probe_raw_snapshot(const char *snap_path, cow_raw_snap_hdr_t *out_hdr, u64 total_archive_bytes, bool show_progress)
 {
 	FILINFO fno;
 	if (f_stat(snap_path, &fno) != FR_OK)
@@ -1396,19 +1658,42 @@ static int _cow_probe_raw_snapshot(const char *snap_path, cow_raw_snap_hdr_t *ou
 		return 1;
 	}
 
-	const u32 buf_sz = 64U * 1024U;
+	u32 buf_sz = COW_SNAP_IO_BUF_BYTES;
 	u8 *buf = (u8 *)malloc(buf_sz);
+	if (!buf)
+	{
+		buf_sz = 64U * 1024U;
+		buf = (u8 *)malloc(buf_sz);
+	}
 	if (!buf)
 	{
 		f_close(&fp);
 		return 1;
 	}
 
+	bool ui = show_progress && (payload_bytes >= COW_SNAP_UI_THRESH_BYTES);
+	int total_mb = (int)(payload_bytes >> 20);
+	if (total_mb < 1)
+		total_mb = 1;
+	u32 px = 0U, py = 0U;
+	u64 next_log = 0ULL;
+	if (ui)
+		cow_ui_getpos(&px, &py);
+
 	u64 rem = payload_bytes;
+	u64 done = 0ULL;
 	u32 pcrc = 0U;
 	int rc = 0;
 	while (rem > 0ULL)
 	{
+		if (ui && done >= next_log)
+		{
+			int cur_mb = (int)(done >> 20);
+			int pct = (int)((done * 100ULL) / payload_bytes);
+			cow_ui_setpos(px, py);
+			gfx_printf("      Verify: %4d / %d MiB (%3d%%)", cur_mb, total_mb, pct);
+			next_log += 4ULL * 1024ULL * 1024ULL;
+		}
 		u32 cur = (rem > buf_sz) ? buf_sz : (u32)rem;
 		br = 0U;
 		if (f_read(&fp, buf, cur, &br) != FR_OK || br != cur)
@@ -1418,6 +1703,20 @@ static int _cow_probe_raw_snapshot(const char *snap_path, cow_raw_snap_hdr_t *ou
 		}
 		pcrc = crc32_calc(pcrc, buf, cur);
 		rem -= cur;
+		done += cur;
+	}
+
+	if (ui)
+	{
+		if (rc == 0)
+		{
+			cow_ui_setpos(px, py);
+			gfx_printf("      Verify: %4d / %d MiB (100%%)\n", total_mb, total_mb);
+		}
+		else
+		{
+			gfx_printf("\n");
+		}
 	}
 
 	free(buf);
@@ -1428,6 +1727,133 @@ static int _cow_probe_raw_snapshot(const char *snap_path, cow_raw_snap_hdr_t *ou
 	if (out_hdr)
 		*out_hdr = shdr;
 	return 0;
+}
+
+static int _cow_snapshot_transfer(
+	FIL *snap_fp,
+	const char *emmc_dir,
+	const u64 *part_sizes,
+	u32 num_parts,
+	u64 abs_off,
+	u64 payload_bytes,
+	bool to_archive,
+	u32 *out_crc32,
+	const char *progress_label)
+{
+	u32 buf_sz = COW_SNAP_IO_BUF_BYTES;
+	u8 *buf = (u8 *)malloc(buf_sz);
+	if (!buf)
+	{
+		buf_sz = 64U * 1024U;
+		buf = (u8 *)malloc(buf_sz);
+	}
+	if (!buf)
+		return 1;
+
+	bool ui = (progress_label != NULL) && (payload_bytes >= COW_SNAP_UI_THRESH_BYTES);
+	int total_mb = (int)(payload_bytes >> 20);
+	if (total_mb < 1)
+		total_mb = 1;
+	u32 px = 0U, py = 0U;
+	u64 next_log = 0ULL;
+	if (ui)
+		cow_ui_getpos(&px, &py);
+
+	u64 part_off = abs_off;
+	u64 done = 0ULL;
+	u32 pcrc = 0U;
+	int rc = 0;
+	char ppath[0x240];
+
+	for (u32 i = 0U; i < num_parts && done < payload_bytes && rc == 0; i++)
+	{
+		u64 psz = part_sizes[i];
+		if (part_off >= psz)
+		{
+			part_off -= psz;
+			continue;
+		}
+
+		_cow_part_path(ppath, emmc_dir, i);
+		FIL part_fp;
+		BYTE pmode = to_archive ? (FA_OPEN_EXISTING | FA_READ | FA_WRITE) : FA_READ;
+		if (f_open(&part_fp, ppath, pmode) != FR_OK)
+		{
+			rc = 1;
+			break;
+		}
+		if (f_lseek(&part_fp, (FSIZE_t)part_off) != FR_OK)
+		{
+			f_close(&part_fp);
+			rc = 1;
+			break;
+		}
+
+		u64 part_rem = psz - part_off;
+		while (done < payload_bytes && part_rem > 0ULL)
+		{
+			if (ui && done >= next_log)
+			{
+				int cur_mb = (int)(done >> 20);
+				int pct = (int)((done * 100ULL) / payload_bytes);
+				cow_ui_setpos(px, py);
+				gfx_printf("%s%4d / %d MiB (%3d%%)", progress_label, cur_mb, total_mb, pct);
+				next_log += 4ULL * 1024ULL * 1024ULL;
+			}
+
+			u64 rem = payload_bytes - done;
+			u64 take64 = (rem < part_rem) ? rem : part_rem;
+			u32 cur = (take64 > buf_sz) ? buf_sz : (u32)take64;
+			UINT io1 = 0U, io2 = 0U;
+			if (to_archive)
+			{
+				if (f_read(snap_fp, buf, cur, &io1) != FR_OK || io1 != cur ||
+				    f_write(&part_fp, buf, cur, &io2) != FR_OK || io2 != cur)
+				{
+					rc = 1;
+					break;
+				}
+			}
+			else
+			{
+				if (f_read(&part_fp, buf, cur, &io1) != FR_OK || io1 != cur ||
+				    f_write(snap_fp, buf, cur, &io2) != FR_OK || io2 != cur)
+				{
+					rc = 1;
+					break;
+				}
+				pcrc = crc32_calc(pcrc, buf, cur);
+			}
+			done += cur;
+			part_rem -= cur;
+		}
+
+		if (to_archive && rc == 0 && f_sync(&part_fp) != FR_OK)
+			rc = 1;
+		f_close(&part_fp);
+		part_off = 0ULL;
+	}
+
+	if (done < payload_bytes)
+		rc = 1;
+
+	if (ui)
+	{
+		if (rc == 0)
+		{
+			cow_ui_setpos(px, py);
+			gfx_printf("%s%4d / %d MiB (100%%)\n", progress_label, total_mb, total_mb);
+		}
+		else
+		{
+			gfx_printf("\n");
+		}
+	}
+
+	free(buf);
+	if (rc == 0 && out_crc32)
+		*out_crc32 = pcrc;
+	return rc;
 }
 
 __attribute__((noinline))
@@ -1447,6 +1873,36 @@ static int _cow_save_raw_snapshot(
 	_cow_mkdir_p(snap_dir);
 
 	u64 payload_bytes = (u64)hdr->next_free_slot * COW_BLOCK_BYTES;
+
+	FILINFO cur_fno;
+	if (f_stat(snap_path, &cur_fno) == FR_OK &&
+	    (u64)cur_fno.fsize == (u64)sizeof(cow_raw_snap_hdr_t) + payload_bytes)
+	{
+		FIL cur_fp;
+		if (f_open(&cur_fp, snap_path, FA_READ) == FR_OK)
+		{
+			cow_raw_snap_hdr_t cur_shdr;
+			UINT rbr = 0U;
+			bool same = (f_read(&cur_fp, &cur_shdr, sizeof(cur_shdr), &rbr) == FR_OK &&
+			             rbr == sizeof(cur_shdr) &&
+			             cur_shdr.magic == COW_RAW_SNAP_MAGIC &&
+			             cur_shdr.snap_version == COW_RAW_SNAP_VERSION &&
+			             crc32_calc(0, (const u8 *)&cur_shdr, offsetof(cow_raw_snap_hdr_t, header_crc32)) == cur_shdr.header_crc32 &&
+			             cur_shdr.cow_version == hdr->version &&
+			             cur_shdr.active_sb_slot == active_sb_slot &&
+			             cur_shdr.seq_num == hdr->seq_num &&
+			             cur_shdr.next_free_slot == hdr->next_free_slot &&
+			             cur_shdr.flags == hdr->flags &&
+			             cur_shdr.dirty_data_blocks == hdr->dirty_data_blocks &&
+			             cur_shdr.dirty_l2_pages == hdr->dirty_l2_pages &&
+			             cur_shdr.base_gen_id == hdr->base_gen_id &&
+			             memcmp(cur_shdr.overlay_uuid, hdr->overlay_uuid, 16U) == 0);
+			f_close(&cur_fp);
+			if (same)
+				return 0;
+		}
+	}
+
 	u64 needed = (u64)sizeof(cow_raw_snap_hdr_t) + payload_bytes + ((u64)min_free_margin_mb * 1024ULL * 1024ULL);
 	u64 sd_free = 0ULL;
 	if (_cow_get_sd_free_bytes(&sd_free) == 0 && sd_free < needed)
@@ -1456,17 +1912,9 @@ static int _cow_save_raw_snapshot(
 	strcpy(tmp_path, snap_path);
 	strcat(tmp_path, ".tmp");
 
-	const u32 buf_sz = 64U * 1024U;
-	u8 *buf = (u8 *)malloc(buf_sz);
-	if (!buf)
-		return 1;
-
 	FIL fp;
 	if (f_open(&fp, tmp_path, FA_CREATE_ALWAYS | FA_READ | FA_WRITE) != FR_OK)
-	{
-		free(buf);
 		return 1;
-	}
 
 	cow_raw_snap_hdr_t shdr;
 	memset(&shdr, 0, sizeof(shdr));
@@ -1474,21 +1922,17 @@ static int _cow_save_raw_snapshot(
 	if (f_write(&fp, &shdr, sizeof(shdr), &bw) != FR_OK || bw != sizeof(shdr))
 		goto fail;
 
-	u64 prefix_bytes = (u64)hdr->prefix_sectors * COW_SECTOR_SIZE;
-	u64 off = 0ULL;
-	u32 pcrc = 0U;
-	while (off < payload_bytes)
+	if (payload_bytes >= COW_SNAP_UI_THRESH_BYTES)
 	{
-		u64 rem = payload_bytes - off;
-		u32 cur = (rem > buf_sz) ? buf_sz : (u32)rem;
-		if (_cow_archive_rw(emmc_dir, part_sizes, num_parts, prefix_bytes + off, buf, cur, false))
-			goto fail;
-		bw = 0U;
-		if (f_write(&fp, buf, cur, &bw) != FR_OK || bw != cur)
-			goto fail;
-		pcrc = crc32_calc(pcrc, buf, cur);
-		off += cur;
+		cow_ui_show(false);
+		gfx_printf("%kcowMMC: saving LKG snapshot...%k\n", COW_CLR_CYAN, COW_CLR_DEF);
 	}
+
+	u64 prefix_bytes = (u64)hdr->prefix_sectors * COW_SECTOR_SIZE;
+	u32 pcrc = 0U;
+	if (_cow_snapshot_transfer(&fp, emmc_dir, part_sizes, num_parts, prefix_bytes,
+	                           payload_bytes, false, &pcrc, "      Save:    "))
+		goto fail;
 
 	shdr.magic                 = COW_RAW_SNAP_MAGIC;
 	shdr.snap_version          = COW_RAW_SNAP_VERSION;
@@ -1517,7 +1961,6 @@ static int _cow_save_raw_snapshot(
 		goto fail;
 	f_sync(&fp);
 	f_close(&fp);
-	free(buf);
 
 	if (opt_prev_path && f_stat(snap_path, NULL) == FR_OK)
 	{
@@ -1539,7 +1982,6 @@ static int _cow_save_raw_snapshot(
 fail:
 	f_close(&fp);
 	f_unlink(tmp_path);
-	free(buf);
 	return 1;
 }
 
@@ -1553,49 +1995,25 @@ static int _cow_restore_raw_snapshot(
 	u64 expected_base_gen_id)
 {
 	cow_raw_snap_hdr_t shdr;
-	if (_cow_probe_raw_snapshot(snap_path, &shdr, total_archive_bytes))
+	if (_cow_probe_raw_snapshot(snap_path, &shdr, total_archive_bytes, true))
 		return 1;
 	if (expected_base_gen_id != 0ULL && shdr.base_gen_id != 0ULL && shdr.base_gen_id != expected_base_gen_id)
 		return 1;
 
-	const u32 buf_sz = 64U * 1024U;
-	u8 *buf = (u8 *)malloc(buf_sz);
-	if (!buf)
-		return 1;
-
 	FIL fp;
 	if (f_open(&fp, snap_path, FA_READ) != FR_OK)
-	{
-		free(buf);
 		return 1;
-	}
 	if (f_lseek(&fp, sizeof(cow_raw_snap_hdr_t)) != FR_OK)
 	{
 		f_close(&fp);
-		free(buf);
 		return 1;
 	}
 
 	u64 prefix_bytes = (u64)shdr.prefix_sectors * COW_SECTOR_SIZE;
 	u64 payload_bytes = (u64)shdr.next_free_slot * COW_BLOCK_BYTES;
-	u64 off = 0ULL;
-	int rc = 0;
-	while (off < payload_bytes)
-	{
-		u64 rem = payload_bytes - off;
-		u32 cur = (rem > buf_sz) ? buf_sz : (u32)rem;
-		UINT br = 0U;
-		if (f_read(&fp, buf, cur, &br) != FR_OK || br != cur ||
-		    _cow_archive_rw(emmc_dir, part_sizes, num_parts, prefix_bytes + off, buf, cur, true))
-		{
-			rc = 1;
-			break;
-		}
-		off += cur;
-	}
-
+	int rc = _cow_snapshot_transfer(&fp, emmc_dir, part_sizes, num_parts, prefix_bytes,
+	                                payload_bytes, true, NULL, "      Restore: ");
 	f_close(&fp);
-	free(buf);
 	return rc;
 }
 
@@ -1638,17 +2056,68 @@ static int _cow_rebaseline_overlay(
 	u32 prefix_sects = io_hdr->prefix_sectors ? io_hdr->prefix_sectors : COW_DEFAULT_PREFIX_SECTS;
 	emmc_set_partition(0U);
 	u32 lba = 0U;
+	u32 p_total_mb = prefix_sects >> 11;
+	u32 px = 0U, py = 0U;
+	cow_ui_getpos(&px, &py);
+	u32 next_log_lba = 0U;
+	FIL p0_fp;
+	bool stream_p0 = (num_parts > 0U && part_sizes[0] >= (u64)prefix_sects * COW_SECTOR_SIZE);
+	if (stream_p0)
+	{
+		char p0_path[0x240];
+		_cow_part_path(p0_path, emmc_dir, 0U);
+		if (f_open(&p0_fp, p0_path, FA_OPEN_EXISTING | FA_READ | FA_WRITE) != FR_OK || f_lseek(&p0_fp, 0) != FR_OK)
+		{
+			f_close(&p0_fp);
+			gfx_printf("\n");
+			free(buf);
+			return 1;
+		}
+	}
 	while (lba < prefix_sects)
 	{
-		u32 take = MIN(prefix_sects - lba, chunk_sectors);
-		if (sdmmc_storage_read(&emmc_storage, lba, take, buf) != 0 ||
-		    _cow_archive_rw(emmc_dir, part_sizes, num_parts, (u64)lba * COW_SECTOR_SIZE, buf, take * COW_SECTOR_SIZE, true))
+		if (lba >= next_log_lba)
 		{
+			u32 cur_mb = lba >> 11;
+			u32 pct = prefix_sects ? (u32)(((u64)lba * 100ULL) / prefix_sects) : 100U;
+			cow_ui_setpos(px, py);
+			gfx_printf("      Prefix: %2d / %d MiB (%3d%%)  ",
+				(int)cur_mb, (int)p_total_mb, (int)pct);
+			next_log_lba += 4096U;
+		}
+		u32 take = MIN(prefix_sects - lba, chunk_sectors);
+		UINT bw = 0U;
+		bool wfail = false;
+		if (sdmmc_storage_read(&emmc_storage, lba, take, buf) != 0)
+			wfail = true;
+		else if (stream_p0)
+			wfail = (f_write(&p0_fp, buf, take * COW_SECTOR_SIZE, &bw) != FR_OK || bw != take * COW_SECTOR_SIZE);
+		else
+			wfail = (_cow_archive_rw(emmc_dir, part_sizes, num_parts, (u64)lba * COW_SECTOR_SIZE, buf, take * COW_SECTOR_SIZE, true) != 0);
+		if (wfail)
+		{
+			if (stream_p0)
+				f_close(&p0_fp);
+			gfx_printf("\n");
 			free(buf);
 			return 1;
 		}
 		lba += take;
 	}
+	if (stream_p0)
+	{
+		if (f_sync(&p0_fp) != FR_OK)
+		{
+			f_close(&p0_fp);
+			gfx_printf("\n");
+			free(buf);
+			return 1;
+		}
+		f_close(&p0_fp);
+	}
+	cow_ui_setpos(px, py);
+	gfx_printf("      Prefix: %2d / %d MiB (100%%)\n",
+		(int)p_total_mb, (int)p_total_mb);
 	free(buf);
 
 	memset(l1_table, 0, active_l1_entries * sizeof(u32));
@@ -1696,7 +2165,7 @@ static int _cow_rebaseline_overlay(
 }
 
 __attribute__((noinline))
-static int _cow_preboot_check_and_grow_ex(const char *base_path, cow_rt_mount_t *opt_rt)
+static int _cow_preboot_check_and_grow_impl(const char *base_path, cow_rt_mount_t *opt_rt, bool skip_base_rehash)
 {
 	char emmc_dir[0x200];
 	strcpy(emmc_dir, base_path);
@@ -1735,7 +2204,7 @@ static int _cow_preboot_check_and_grow_ex(const char *base_path, cow_rt_mount_t 
 	if (hdr.flags & COW_FLAG_CONFLICT_LOCKED)
 	{
 		free(l1_table);
-		EPRINTF("cowMMC: CONFLICT_LOCKED flag set! Reconcile overlay first.");
+		EPRINTF("cowMMC: CONFLICT_LOCKED flag!\nReconcile overlay first.");
 		return 1;
 	}
 
@@ -1754,7 +2223,7 @@ static int _cow_preboot_check_and_grow_ex(const char *base_path, cow_rt_mount_t 
 	if ((hdr.flags & COW_FLAG_FW_MISMATCH) && !cfg.auto_reset_on_drift)
 	{
 		free(l1_table);
-		EPRINTF("cowMMC: FW_MISMATCH flag set! Rebase/new overlay required.");
+		EPRINTF("cowMMC: FW_MISMATCH flag set!\nRebase or new overlay required.");
 		return 1;
 	}
 
@@ -1770,13 +2239,13 @@ static int _cow_preboot_check_and_grow_ex(const char *base_path, cow_rt_mount_t 
 	bool chk_sys    = !_cow_is_zero(hdr.system_digest_sha256, 32U);
 	bool chk_usr    = !_cow_is_zero(hdr.user_digest_sha256, 32U);
 
-	if (!rebaseline_now && (chk_pkg1 || chk_patrol || chk_boot1 || chk_gpt || chk_pkg2 || chk_sys || chk_usr))
+	if (!skip_base_rehash && !rebaseline_now && (chk_pkg1 || chk_patrol || chk_boot1 || chk_gpt || chk_pkg2 || chk_sys || chk_usr))
 	{
 		cow_base_digests_t cur;
 		if (_cow_read_and_hash_physical_base(&cur, false, NULL, true))
 		{
 			free(l1_table);
-			EPRINTF("cowMMC: Failed to hash physical eMMC base.");
+			EPRINTF("cowMMC: Failed to hash\nphysical eMMC base.");
 			return 1;
 		}
 
@@ -1810,7 +2279,7 @@ static int _cow_preboot_check_and_grow_ex(const char *base_path, cow_rt_mount_t 
 				u32 next_slot = active_slot ^ 1U;
 				_cow_commit_superblock(emmc_dir, part_sizes, num_parts, next_slot, &hdr, l1_table);
 				free(l1_table);
-				EPRINTFARGS("cowMMC: Physical sysNAND FW/layout changed (drift=0x%08X)! Mount blocked.", hdr.base_drift_part_mask);
+				EPRINTFARGS("sysNAND changed (drift=0x%08X)!\nMount blocked.", hdr.base_drift_part_mask);
 				return 1;
 			}
 		}
@@ -1824,13 +2293,15 @@ static int _cow_preboot_check_and_grow_ex(const char *base_path, cow_rt_mount_t 
 				hdr.flags = new_flags;
 				need_sb_commit = true;
 			}
-			WPRINTF("cowMMC: BOOT0 NAND Patrol changed (non-fatal).");
+			WPRINTF("cowMMC: BOOT0 Patrol changed\n(non-fatal).");
 		}
 	}
 
 	if (rebaseline_now)
 	{
-		gfx_printf("cowMMC: sysNAND drift detected, auto-rebaselining overlay...\n");
+		cow_ui_show(true);
+		gfx_printf("%kcowMMC: sysNAND drift detected!%k\nAuto-rebaselining overlay...\n",
+			COW_CLR_CYAN, COW_CLR_DEF);
 		if (_cow_rebaseline_overlay(base_path, emmc_dir, part_sizes, num_parts,
 		                            &active_slot, &hdr, l1_table, active_l1_entries))
 		{
@@ -1838,6 +2309,7 @@ static int _cow_preboot_check_and_grow_ex(const char *base_path, cow_rt_mount_t 
 			EPRINTF("cowMMC: Auto-rebaseline failed!");
 			return 1;
 		}
+		gfx_printf("%kcowMMC: re-baseline complete!%k\n\n", COW_CLR_GREEN, COW_CLR_DEF);
 		need_sb_commit = false;
 	}
 
@@ -1886,6 +2358,10 @@ static int _cow_preboot_check_and_grow_ex(const char *base_path, cow_rt_mount_t 
 					if (target_total_bytes > total_archive_bytes)
 					{
 						u64 bytes_to_add = target_total_bytes - total_archive_bytes;
+						u32 add_mb = (u32)((bytes_to_add + (1024ULL * 1024ULL - 1ULL)) >> 20);
+						cow_ui_show(false);
+						gfx_printf("%kcowMMC: growing pool (+%d MiB)...%k\n",
+							COW_CLR_CYAN, (int)add_mb, COW_CLR_DEF);
 						u32 last_idx = num_parts - 1U;
 						char ppath[0x240];
 
@@ -1929,8 +2405,8 @@ static int _cow_preboot_check_and_grow_ex(const char *base_path, cow_rt_mount_t 
 						new_total_slots = hdr.max_overlay_slots;
 					if (new_total_slots > hdr.total_slots)
 					{
-						gfx_printf("cowMMC: thin pool grew %d -> %d slots.\n",
-							(int)hdr.total_slots, (int)new_total_slots);
+						gfx_printf("%kcowMMC: pool grew %d -> %d MiB.%k\n\n",
+							COW_CLR_GREEN, (int)(hdr.total_slots / 64U), (int)(new_total_slots / 64U), COW_CLR_DEF);
 						hdr.total_slots = new_total_slots;
 						need_sb_commit = true;
 					}
@@ -1946,7 +2422,7 @@ static int _cow_preboot_check_and_grow_ex(const char *base_path, cow_rt_mount_t 
 		if (_cow_commit_superblock(emmc_dir, part_sizes, num_parts, next_slot, &hdr, l1_table))
 		{
 			free(l1_table);
-			EPRINTF("cowMMC: Failed to commit pre-boot superblock update.");
+			EPRINTF("cowMMC: Failed to commit\nsuperblock update.");
 			return 1;
 		}
 		active_slot = next_slot;
@@ -1957,8 +2433,10 @@ static int _cow_preboot_check_and_grow_ex(const char *base_path, cow_rt_mount_t 
 	u32 pool_cap  = (hdr.total_slots > hdr.first_data_slot) ? (hdr.total_slots - hdr.first_data_slot) : 0U;
 	if (pool_cap > 0U && ((u64)pool_used * 100ULL >= (u64)pool_cap * 85ULL))
 	{
-		gfx_printf("cowMMC: WARNING COW pool %u%% full (%u/%u slots)!\n",
-			(u32)(((u64)pool_used * 100ULL) / (u64)pool_cap), pool_used, pool_cap);
+		gfx_printf("%kcowMMC: COW pool %d%% full\n(%d / %d slots)!%k\n",
+			COW_CLR_WARN,
+			(int)(((u64)pool_used * 100ULL) / (u64)pool_cap),
+			(int)pool_used, (int)pool_cap, COW_CLR_DEF);
 	}
 
 	/* Persistent-mode LKG snapshot capture and A/B bootloop auto-rollback */
@@ -1982,6 +2460,9 @@ static int _cow_preboot_check_and_grow_ex(const char *base_path, cow_rt_mount_t 
 			u32 attempts = (u32)_cow_read_u32_file(pend_path, 1U);
 			if (cfg.auto_rollback && attempts >= cfg.rollback_threshold)
 			{
+				cow_ui_show(true);
+				gfx_printf("%kcowMMC: bootloop (%d fails)%k\nRestoring LKG snapshot...\n",
+					COW_CLR_WARN, (int)attempts, COW_CLR_DEF);
 				const char *cand = NULL;
 				if (_cow_restore_raw_snapshot(lkg_path, emmc_dir, part_sizes, num_parts, total_archive_bytes, hdr.base_gen_id) == 0)
 					cand = lkg_path;
@@ -1994,17 +2475,17 @@ static int _cow_preboot_check_and_grow_ex(const char *base_path, cow_rt_mount_t 
 					                           &active_slot, &active_l1_entries, &active_first_data, &hdr, l1_table))
 					{
 						free(l1_table);
-						EPRINTF("cowMMC: Failed to reload superblock after LKG rollback!");
+						EPRINTF("cowMMC: Reload failed after\nLKG rollback!");
 						return 1;
 					}
 					f_unlink(pend_path);
 					has_pending = false;
 					rolled_back = true;
-					gfx_printf("cowMMC: Bootloop detected (%u failed boots), restored LKG!\n", attempts);
+					gfx_printf("%kcowMMC: LKG snapshot restored!%k\n\n", COW_CLR_GREEN, COW_CLR_DEF);
 				}
 				else
 				{
-					WPRINTF("cowMMC: Bootloop detected but no valid LKG snapshot available.");
+					WPRINTF("Bootloop detected, no valid\nLKG snapshot available.");
 				}
 			}
 			if (has_pending)
@@ -2018,7 +2499,7 @@ static int _cow_preboot_check_and_grow_ex(const char *base_path, cow_rt_mount_t 
 				if (_cow_save_raw_snapshot(base_path, emmc_dir, part_sizes, num_parts,
 				                           active_slot, &hdr, lkg_path, prev_path, 16U))
 				{
-					WPRINTF("cowMMC: Skipped auto LKG snapshot (low SD space or I/O error).");
+					WPRINTF("Skipped auto LKG snapshot\n(low SD space or I/O error).");
 				}
 			}
 			if (has_ok && cfg.auto_rollback)
@@ -2055,6 +2536,14 @@ static int _cow_preboot_check_and_grow_ex(const char *base_path, cow_rt_mount_t 
 #ifdef COW_BSO_MODULE
 __attribute__((unused))
 #endif
+static int _cow_preboot_check_and_grow_ex(const char *base_path, cow_rt_mount_t *opt_rt)
+{
+	return _cow_preboot_check_and_grow_impl(base_path, opt_rt, false);
+}
+
+#ifdef COW_BSO_MODULE
+__attribute__((unused))
+#endif
 static int _cow_preboot_check_and_grow(const char *base_path)
 {
 	return _cow_preboot_check_and_grow_ex(base_path, NULL);
@@ -2067,14 +2556,26 @@ static int _cow_autoinit(const char *base_path, const char *cfg_path, u32 emu_id
 	_cow_parse_autoinit_cfg(cfg_path, &cfg);
 	if (cfg.invalid)
 	{
-		EPRINTF("cowMMC: Invalid cow_autoinit configuration.");
+		EPRINTF("Invalid cow_autoinit cfg.");
 		return 1;
 	}
+
+	cow_ui_show(true);
+	gfx_printf("%kcowMMC Auto-Init (v%d)%k\n",
+		COW_CLR_CYAN, (int)COW_VERSION_V2, COW_CLR_DEF);
+	gfx_printf("Path: %s\n", base_path);
+	gfx_printf("Mode: %s, %s\n\n",
+		cfg.thin ? "thin" : "thick",
+		cfg.ephemeral ? "ephemeral" : "persistent");
+	gfx_printf("[1/5] Checking SD free space...\n");
 
 	const u32 chunk_sectors = 1024U; /* 512 KiB buffer */
 	u8 *buf = (u8 *)malloc(chunk_sectors * COW_SECTOR_SIZE);
 	if (!buf)
+	{
+		EPRINTF("Out of memory.");
 		return 1;
+	}
 
 	char emmc_dir[0x200];
 	char fpath[0x240];
@@ -2089,13 +2590,16 @@ static int _cow_autoinit(const char *base_path, const char *cfg_path, u32 emu_id
 	/* 1. Check SD free headroom before allocating pool */
 	u64 sd_free_bytes = 0ULL;
 	if (_cow_get_sd_free_bytes(&sd_free_bytes))
+	{
+		EPRINTF("Failed to query SD free space.");
 		goto fail;
+	}
 
 	u64 reserve_bytes = (u64)cfg.sd_reserve_mb * 1024ULL * 1024ULL;
 	u64 overhead_bytes = ((u64)COW_BOOT_PART_BYTES * 2ULL) + COW_DEFAULT_PREFIX_BYTES;
 	if (sd_free_bytes <= reserve_bytes + overhead_bytes)
 	{
-		EPRINTF("cowMMC: Insufficient SD free space (respecting sd_reserve_mb).");
+		EPRINTF("Insufficient SD free space\n(respecting sd_reserve_mb).");
 		goto fail;
 	}
 	u64 max_safe_pool_bytes = ((sd_free_bytes - reserve_bytes - overhead_bytes) / COW_BLOCK_BYTES) * COW_BLOCK_BYTES;
@@ -2115,22 +2619,35 @@ static int _cow_autoinit(const char *base_path, const char *cfg_path, u32 emu_id
 		u64 req_slots64 = req_bytes / COW_BLOCK_BYTES;
 		if (req_slots64 > max_safe_pool_slots)
 		{
-			EPRINTF("cowMMC: Requested size_mb exceeds safe SD free space.");
+			EPRINTF("Requested size_mb exceeds\nsafe SD free space.");
 			goto fail;
 		}
 		total_slots = (u32)req_slots64;
 	}
 
 	if (total_slots <= COW_FIRST_DATA_SLOT)
+	{
+		EPRINTF("Pool too small for metadata.");
 		goto fail;
+	}
+
+	gfx_printf("      Free: %d MiB, Pool: %d MiB\n",
+		(int)(sd_free_bytes >> 20), (int)(total_slots / 64U));
+	gfx_printf("[2/5] Copying & hashing sysMMC...\n");
 
 	/* 2. Copy physical boot0 & boot1 and hash physical regions */
 	cow_base_digests_t digests;
 	if (_cow_read_and_hash_physical_base(&digests, true, emmc_dir, true))
+	{
+		EPRINTF("Failed to read/hash sysMMC.");
 		goto fail;
+	}
 
 	if (!digests.gpt_valid || !digests.pkg2_valid)
+	{
+		EPRINTF("Invalid physical GPT or pkg2.");
 		goto fail;
+	}
 
 	u64 phys_gpp_sectors = digests.phys_gpp_sectors;
 	u64 gpp_total_sectors = phys_gpp_sectors;
@@ -2138,7 +2655,10 @@ static int _cow_autoinit(const char *base_path, const char *cfg_path, u32 emu_id
 	u64 sectors_per_l1 = (u64)COW_L2_ENTRIES * COW_BLOCK_SECTORS;
 	u64 needed_l1 = (gpp_total_sectors + sectors_per_l1 - 1ULL) / sectors_per_l1;
 	if (needed_l1 > COW_L1_ENTRIES)
+	{
+		EPRINTF("Physical GPP exceeds L1 map.");
 		goto fail;
+	}
 	u32 l1_entries = (needed_l1 <= COW_V2_DEFAULT_L1_ENTRIES) ? COW_V2_DEFAULT_L1_ENTRIES : COW_L1_ENTRIES;
 	u32 l1_slots = COW_L1_SLOTS_FOR(l1_entries);
 	u32 l1_slot_a = COW_SUPERBLOCK_SLOTS;
@@ -2147,7 +2667,10 @@ static int _cow_autoinit(const char *base_path, const char *cfg_path, u32 emu_id
 	u32 max_overlay_slots = total_slots;
 
 	if (total_slots <= first_data_slot)
+	{
+		EPRINTF("Pool smaller than L1 metadata.");
 		goto fail;
+	}
 
 	if (cfg.thin)
 	{
@@ -2167,13 +2690,15 @@ static int _cow_autoinit(const char *base_path, const char *cfg_path, u32 emu_id
 		max_overlay_slots = (max64 > 0xFFFFFFFFULL) ? 0xFFFFFFFFU : (u32)max64;
 	}
 	if (max_overlay_slots < total_slots)
+	{
+		EPRINTF("max_size_mb below initial pool.");
 		goto fail;
-
-	gfx_printf("cowMMC: initializing v%d %s (%d MiB pool)...\n",
-		(int)COW_VERSION_V2, base_path, (int)(total_slots / 64U));
+	}
 
 	/* 3. Create /eMMC/00..NN with 32 MiB prefix + ping-pong superblocks + external L1 + COW pool */
 	u64 cow_pool_bytes = (u64)total_slots * COW_BLOCK_BYTES;
+	gfx_printf("[3/5] Allocating pool (%d MiB)...\n",
+		(int)(cow_pool_bytes >> 20));
 	u64 remaining = COW_DEFAULT_PREFIX_BYTES + cow_pool_bytes;
 	u64 part_max_bytes = (u64)cfg.part_max_mb * 1024ULL * 1024ULL;
 	u32 flags = cfg.ephemeral ? COW_FLAG_EPHEMERAL : 0U;
@@ -2220,7 +2745,10 @@ static int _cow_autoinit(const char *base_path, const char *cfg_path, u32 emu_id
 
 	u8 *sb_buf = (u8 *)malloc(COW_BLOCK_BYTES);
 	if (!sb_buf)
+	{
+		EPRINTF("Out of memory.");
 		goto fail;
+	}
 
 	u32 part_idx = 0U;
 	while (remaining > 0ULL && part_idx < COW_MAX_SPLIT_PARTS)
@@ -2232,43 +2760,65 @@ static int _cow_autoinit(const char *base_path, const char *cfg_path, u32 emu_id
 		if (f_open(&fp, fpath, FA_CREATE_ALWAYS | FA_READ | FA_WRITE) != FR_OK)
 		{
 			free(sb_buf);
+			EPRINTF("Failed to create pool part.");
 			goto fail;
 		}
 
-		u8 zero = 0U;
-		UINT bw = 0U;
-		if (f_lseek(&fp, (FSIZE_t)(cur_size - 1ULL)) != FR_OK ||
-		    f_write(&fp, &zero, 1U, &bw) != FR_OK || bw != 1U ||
+		if (_cow_prealloc_file_stepped(&fp, 0ULL, cur_size, "      Part", (int)part_idx) != 0 ||
 		    f_lseek(&fp, 0) != FR_OK)
 		{
 			f_close(&fp);
 			free(sb_buf);
+			EPRINTF("Failed to prealloc pool file.");
 			goto fail;
 		}
 
 		if (part_idx == 0U)
 		{
+			gfx_printf("[4/5] Copying 32 MiB GPP prefix...\n");
 			emmc_set_partition(0U);
 			u32 lba = 0U;
+			u32 p_total_mb = COW_DEFAULT_PREFIX_SECTS >> 11;
+			u32 px = 0U, py = 0U;
+			cow_ui_getpos(&px, &py);
+			u32 next_log_lba = 0U;
+			UINT bw = 0U;
 			while (lba < COW_DEFAULT_PREFIX_SECTS)
 			{
+				if (lba >= next_log_lba)
+				{
+					u32 cur_mb = lba >> 11;
+					u32 pct = (u32)(((u64)lba * 100ULL) / COW_DEFAULT_PREFIX_SECTS);
+					cow_ui_setpos(px, py);
+					gfx_printf("      %2d / %d MiB (%3d%%)  ",
+						(int)cur_mb, (int)p_total_mb, (int)pct);
+					next_log_lba += 4096U;
+				}
 				u32 cur = MIN(COW_DEFAULT_PREFIX_SECTS - lba, chunk_sectors);
 				if (sdmmc_storage_read(&emmc_storage, lba, cur, buf) != 0)
 				{
+					gfx_printf("\n");
 					f_close(&fp);
 					free(sb_buf);
+					EPRINTF("Failed to read sysMMC prefix.");
 					goto fail;
 				}
 				bw = 0U;
 				if (f_write(&fp, buf, cur * COW_SECTOR_SIZE, &bw) != FR_OK || bw != cur * COW_SECTOR_SIZE)
 				{
+					gfx_printf("\n");
 					f_close(&fp);
 					free(sb_buf);
+					EPRINTF("Failed to write SD prefix.");
 					goto fail;
 				}
 				lba += cur;
 			}
+			cow_ui_setpos(px, py);
+			gfx_printf("      %2d / %d MiB (100%%)\n",
+				(int)p_total_mb, (int)p_total_mb);
 
+			gfx_printf("      Writing superblocks & L1...");
 			for (u32 slot = 0U; slot < COW_SUPERBLOCK_SLOTS; slot++)
 			{
 				bw = 0U;
@@ -2276,8 +2826,10 @@ static int _cow_autoinit(const char *base_path, const char *cfg_path, u32 emu_id
 
 				if (f_write(&fp, sb_buf, COW_BLOCK_BYTES, &bw) != FR_OK || bw != COW_BLOCK_BYTES)
 				{
+					gfx_printf(" fail\n");
 					f_close(&fp);
 					free(sb_buf);
+					EPRINTF("Failed to write superblock.");
 					goto fail;
 				}
 			}
@@ -2288,11 +2840,14 @@ static int _cow_autoinit(const char *base_path, const char *cfg_path, u32 emu_id
 				bw = 0U;
 				if (f_write(&fp, sb_buf, COW_BLOCK_BYTES, &bw) != FR_OK || bw != COW_BLOCK_BYTES)
 				{
+					gfx_printf(" fail\n");
 					f_close(&fp);
 					free(sb_buf);
+					EPRINTF("Failed to write L1 table.");
 					goto fail;
 				}
 			}
+			gfx_printf(" ok\n");
 		}
 
 		f_sync(&fp);
@@ -2302,9 +2857,13 @@ static int _cow_autoinit(const char *base_path, const char *cfg_path, u32 emu_id
 	}
 	free(sb_buf);
 	if (remaining > 0ULL)
+	{
+		EPRINTF("Pool exceeds max split parts.");
 		goto fail;
+	}
 
 	/* 4. Create file_based marker, lifecycle subdirs, cow_config, and /emuMMC/emummc.ini */
+	gfx_printf("[5/5] Writing markers & config...");
 	FIL mf;
 	_cow_join_path(fpath, base_path, "/file_based");
 	if (f_open(&mf, fpath, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK)
@@ -2344,6 +2903,8 @@ static int _cow_autoinit(const char *base_path, const char *cfg_path, u32 emu_id
 		}
 	}
 
+	gfx_printf(" ok\n\n");
+	gfx_printf("%kcowMMC auto-init complete!%k\n\n", COW_CLR_GREEN, COW_CLR_DEF);
 	free(buf);
 	return 0;
 
@@ -2497,7 +3058,7 @@ static int _cow_read_gpp_entry(u32 sector, u32 num_sectors, void *buf)
 
 static int _cow_run_init(cow_bso_ctx_t *ctx)
 {
-	if (!ctx || ctx->api_magic != COW_BSO_MAGIC)
+	if (!ctx || (ctx->api_magic != COW_BSO_MAGIC && ctx->api_magic != COW_BSO_MAGIC_V2))
 		return 1;
 
 	g_ops = ctx;
@@ -2513,6 +3074,7 @@ static int _cow_run_init(cow_bso_ctx_t *ctx)
 	strcat(part0, "/eMMC/00");
 
 	FILINFO fno;
+	bool did_autoinit = false;
 	if (f_stat(part0, &fno) != FR_OK)
 	{
 		char auto_cfg[0x240];
@@ -2526,6 +3088,7 @@ static int _cow_run_init(cow_bso_ctx_t *ctx)
 				ctx->rc = 1U;
 				return 1;
 			}
+			did_autoinit = true;
 		}
 		else
 		{
@@ -2533,12 +3096,15 @@ static int _cow_run_init(cow_bso_ctx_t *ctx)
 		}
 	}
 
-	if (_cow_preboot_check_and_grow_ex(ctx->base_path, &g_rt))
+	if (_cow_preboot_check_and_grow_impl(ctx->base_path, &g_rt, did_autoinit))
 	{
 		_cow_rt_clear();
 		ctx->rc = 1U;
 		return 1;
 	}
+
+	if (did_autoinit)
+		gfx_printf("cowMMC: ready, booting HOS...\n\n");
 
 	if (g_rt.active)
 		ctx->active = 1U;
@@ -2549,9 +3115,9 @@ static int _cow_run_init(cow_bso_ctx_t *ctx)
 __attribute__((visibility("default")))
 void cow_entry(void *moduleConfig, bdk_params_t *bp)
 {
-	(void)bp;
 	cow_bso_ctx_t *ctx = (cow_bso_ctx_t *)moduleConfig;
-	if (!ctx || ctx->api_magic != COW_BSO_MAGIC)
+	g_bdk = bp;
+	if (!ctx || (ctx->api_magic != COW_BSO_MAGIC && ctx->api_magic != COW_BSO_MAGIC_V2))
 		return;
 
 	ctx->fn_run_init = _cow_run_init;

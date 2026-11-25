@@ -9,7 +9,8 @@
 #include <libs/fatfs/ff.h>
 #include <storage/sdmmc.h>
 
-#define COW_BSO_MAGIC 0x42574F43U /* "COWB" */
+#define COW_BSO_MAGIC    0x42574F43U /* "COWB" */
+#define COW_BSO_MAGIC_V2 0x32425743U /* "CWB2" */
 
 typedef struct _cow_bso_ctx_t
 {
@@ -50,6 +51,10 @@ typedef struct _cow_bso_ctx_t
 
 	int (*fn_run_init)(struct _cow_bso_ctx_t *ctx);
 	int (*fn_read_gpp)(u32 sector, u32 num_sectors, void *buf);
+
+	void (*fn_gfx_show_console)(bool clear_screen);
+	void (*fn_gfx_con_getpos)(u32 *x, u32 *y);
+	void (*fn_gfx_con_setpos)(u32 x, u32 y);
 } cow_bso_ctx_t;
 
 #endif
