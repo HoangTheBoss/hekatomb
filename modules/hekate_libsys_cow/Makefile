@@ -17,6 +17,7 @@ TRACK_LDFLAGS = $(BUILDDIR)/.ldflags
 
 OBJS = $(addprefix $(BUILDDIR)/,\
 	sys_cow.o \
+	mooswitch_update.o \
 )
 
 FFCFG_INC := '"../bootloader/libs/fatfs/ffconf.h"'

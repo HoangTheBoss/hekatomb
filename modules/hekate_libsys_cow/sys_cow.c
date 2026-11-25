@@ -12,6 +12,7 @@
 #include <sec/se_t210.h>
 #include <libs/fatfs/ff.h>
 #include <storage/cow_bso.h>
+#include <storage/mooswitch_update.h>
 
 #ifdef COW_BSO_MODULE
 
@@ -3483,9 +3484,19 @@ static int _cow_run_init(cow_bso_ctx_t *ctx)
 __attribute__((visibility("default")))
 void cow_entry(void *moduleConfig, bdk_params_t *bp)
 {
-	cow_bso_ctx_t *ctx = (cow_bso_ctx_t *)moduleConfig;
 	g_bdk = bp;
-	if (!ctx || (ctx->api_magic != COW_BSO_MAGIC && ctx->api_magic != COW_BSO_MAGIC_V2 && ctx->api_magic != COW_BSO_MAGIC_V3))
+	if (!moduleConfig)
+		return;
+
+	if (*(const u32 *)moduleConfig == MSW_BSO_MAGIC)
+	{
+		msw_bso_ctx_t *mctx = (msw_bso_ctx_t *)moduleConfig;
+		mctx->applied = mooswitch_apply_staged_update_with_ops(&mctx->ops) ? 1U : 0U;
+		return;
+	}
+
+	cow_bso_ctx_t *ctx = (cow_bso_ctx_t *)moduleConfig;
+	if (ctx->api_magic != COW_BSO_MAGIC && ctx->api_magic != COW_BSO_MAGIC_V2 && ctx->api_magic != COW_BSO_MAGIC_V3)
 		return;
 
 	ctx->fn_run_init = _cow_run_init;

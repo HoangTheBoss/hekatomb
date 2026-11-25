@@ -31,6 +31,7 @@
 #include <libs/compr/blz.h>
 #include <libs/fatfs/ff.h>
 #include "storage/emummc.h"
+#include <storage/mooswitch_update.h>
 
 #include "frontend/fe_tools.h"
 #include "frontend/fe_info.h"
@@ -151,7 +152,7 @@ bool is_ipl_updated(void *buf, u32 size, const char *path, bool force)
 	return true;
 }
 
-static void _launch_payload(char *path, bool update, bool clear_screen)
+static void _launch_payload_ex(char *path, bool update, bool clear_screen, bool force_update)
 {
 	if (clear_screen)
 		gfx_clear_grey(0x1B);
@@ -168,8 +169,34 @@ static void _launch_payload(char *path, bool update, bool clear_screen)
 		goto out;
 	}
 
-	if (update && is_ipl_updated(buf, size, path, false))
-		goto out;
+	if (update)
+	{
+		if (force_update)
+		{
+			if (size < (VERSION_RCFG_OFF + sizeof(rsvd_cfg_t)))
+			{
+				gfx_con.mute = false;
+				EPRINTF("Invalid bootloader update size!");
+				goto out;
+			}
+
+			ipl_ver_meta_t *update_ft = (ipl_ver_meta_t *)((u8 *)buf + PATCHED_RELOC_SZ + sizeof(boot_cfg_t));
+			if (update_ft->magic != ipl_ver.magic)
+			{
+				gfx_con.mute = false;
+				EPRINTF("Invalid bootloader update magic!");
+				goto out;
+			}
+
+			if (memcmp((u8 *)(IPL_LOAD_ADDR + VERSION_RCFG_OFF), (u8 *)((u8 *)buf + VERSION_RCFG_OFF), sizeof(rsvd_cfg_t)))
+			{
+				memcpy((u8 *)((u8 *)buf + VERSION_RCFG_OFF), (u8 *)(IPL_LOAD_ADDR + VERSION_RCFG_OFF), sizeof(rsvd_cfg_t));
+				sd_save_to_file(buf, size, path);
+			}
+		}
+		else if (is_ipl_updated(buf, size, path, false))
+			goto out;
+	}
 
 	// Check if it safely fits IRAM.
 	if (size > 0x30000)
@@ -215,6 +242,11 @@ out:
 		gfx_con.mute = false;
 		EPRINTF("Failed to launch payload!");
 	}
+}
+
+static void _launch_payload(char *path, bool update, bool clear_screen)
+{
+	_launch_payload_ex(path, update, clear_screen, false);
 }
 
 static void _launch_payloads()
@@ -1428,6 +1460,51 @@ ment_t ment_top[] = {
 
 menu_t menu_top = { ment_top, "hekate v6.5.5", 0, 0 };
 
+static msw_bso_ctx_t s_msw_ctx = { 0 };
+
+static void _msw_show_console(void)
+{
+	gfx_con.mute = false;
+	gfx_con.fntsz = 16;
+	gfx_con_setcol(TXT_CLR_DEFAULT, 1, TXT_CLR_BG);
+	gfx_clear_grey(0x1B);
+	gfx_con_setpos(0, 0);
+	display_backlight_brightness(h_cfg.backlight ? h_cfg.backlight : 100, 1000);
+}
+
+static void _msw_btn_wait(void)
+{
+	(void)btn_wait();
+}
+
+static bool _mooswitch_apply_staged_update(void)
+{
+	if (f_stat(MOOSWITCH_STAGING_DIR, NULL) != FR_OK)
+		return false;
+
+	s_msw_ctx.api_magic        = MSW_BSO_MAGIC;
+	s_msw_ctx.applied          = 0U;
+	s_msw_ctx.ops.stat         = f_stat;
+	s_msw_ctx.ops.mkdir        = f_mkdir;
+	s_msw_ctx.ops.unlink       = f_unlink;
+	s_msw_ctx.ops.rename       = f_rename;
+	s_msw_ctx.ops.chmod        = f_chmod;
+	s_msw_ctx.ops.opendir      = f_opendir;
+	s_msw_ctx.ops.readdir      = f_readdir;
+	s_msw_ctx.ops.closedir     = f_closedir;
+	s_msw_ctx.ops.read_file    = sd_file_read;
+	s_msw_ctx.ops.malloc       = malloc;
+	s_msw_ctx.ops.zalloc       = zalloc;
+	s_msw_ctx.ops.free         = free;
+	s_msw_ctx.ops.show_console = _msw_show_console;
+	s_msw_ctx.ops.printf       = gfx_printf;
+	s_msw_ctx.ops.msleep       = msleep;
+	s_msw_ctx.ops.btn_wait     = _msw_btn_wait;
+
+	ianos_static_module("bootloader/sys/libsys_cow.bso", &s_msw_ctx);
+	return s_msw_ctx.applied != 0U;
+}
+
 extern void pivot_stack(u32 stack_top);
 
 void ipl_main()
@@ -1508,6 +1585,8 @@ skip_lp0_minerva_config:
 	// Load saved configuration and auto boot if enabled.
 	if (!(h_cfg.errors & ERR_SD_BOOT_EN))
 	{
+		if (_mooswitch_apply_staged_update())
+			_launch_payload_ex("bootloader/update.bin", true, false, true);
 		_check_for_updated_bootloader();
 		_auto_launch();
 	}
