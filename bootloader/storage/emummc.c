@@ -59,6 +59,11 @@ static bool _cow_overlay_requires_bso(const char *base_path)
 	return found;
 }
 
+static void _cow_gfx_backlight(void)
+{
+	display_backlight_brightness(h_cfg.backlight ? h_cfg.backlight : 100, 1000);
+}
+
 static void _cow_gfx_show_console(bool clear_screen)
 {
 	bool was_muted = gfx_con.mute;
@@ -70,12 +75,12 @@ static void _cow_gfx_show_console(bool clear_screen)
 		gfx_clear_grey(0x1B);
 		gfx_con_setpos(0, 0);
 	}
-	display_backlight_brightness(h_cfg.backlight ? h_cfg.backlight : 100, 1000);
+	_cow_gfx_backlight();
 }
 
 static void _cow_bind_ops(const char *base_path)
 {
-	s_cow_ctx.api_magic                        = COW_BSO_MAGIC_V2;
+	s_cow_ctx.api_magic                        = COW_BSO_MAGIC_V3;
 	s_cow_ctx.active                           = 0U;
 	s_cow_ctx.rc                               = 0U;
 	s_cow_ctx.force_disable                    = (u32)h_cfg.emummc_force_disable;
@@ -109,6 +114,7 @@ static void _cow_bind_ops(const char *base_path)
 	s_cow_ctx.fn_gfx_show_console              = _cow_gfx_show_console;
 	s_cow_ctx.fn_gfx_con_getpos                = gfx_con_getpos;
 	s_cow_ctx.fn_gfx_con_setpos                = gfx_con_setpos;
+	s_cow_ctx.fn_gfx_backlight                 = _cow_gfx_backlight;
 }
 
 emummc_cfg_t emu_cfg = { 0 };

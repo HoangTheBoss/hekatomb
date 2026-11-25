@@ -24,6 +24,8 @@
 #define COW_BOOT_PART_SECTORS    0x2000U
 #define COW_BOOT0_BCTSAVE_OFF    0xFC000U
 #define COW_BOOT0_BCTSAVE_LEN    0x4000U
+#define COW_BOOT0_PKG1_OFF       0x100000U
+#define COW_BOOT0_PKG1_LEN       0x80000U
 #define COW_BOOT0_PATROL_OFF     0x184000U
 #define COW_BOOT0_PATROL_LEN     0x200U
 #define COW_HASH_BUF_BYTES       0x800000U
@@ -367,6 +369,7 @@ typedef struct _cow_phys_digests_t
 {
 	u8   emmc_cid_sha256_16[16];
 	u8   boot0_pkg1_sha256[32];
+	u8   boot0_legacy_sha256[32];
 	u8   boot0_patrol_sha256_16[16];
 	u8   boot1_sha256[32];
 	u8   gpt_sha256[32];
@@ -443,7 +446,7 @@ static void _ensure_overlay_subdirs_and_config(const char *base_path)
 		if (f_open(&fp, p, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK)
 		{
 			static const char *cfg_txt =
-				"auto_reset_on_drift=1\n"
+				"auto_reset_on_drift=0\n"
 				"auto_snapshot=1\n"
 				"auto_rollback=1\n"
 				"rollback_threshold=2\n";
@@ -586,9 +589,13 @@ static int _collect_physical_base_digests(
 		goto fail;
 	memcpy(out->boot0_patrol_sha256_16, patrol_full, sizeof(out->boot0_patrol_sha256_16));
 
+	/* Modchip-safe: hash Nintendo PKG1 [0x100000..0x180000) directly before legacy zeroing */
+	if (se_sha_hash_256_oneshot(out->boot0_pkg1_sha256, buf + COW_BOOT0_PKG1_OFF, COW_BOOT0_PKG1_LEN) != 0)
+		goto fail;
+
 	memset(buf + COW_BOOT0_BCTSAVE_OFF, 0, COW_BOOT0_BCTSAVE_LEN);
 	memset(buf + COW_BOOT0_PATROL_OFF, 0, COW_BOOT0_PATROL_LEN);
-	if (se_sha_hash_256_oneshot(out->boot0_pkg1_sha256, buf, COW_BOOT_PART_BYTES) != 0)
+	if (se_sha_hash_256_oneshot(out->boot0_legacy_sha256, buf, COW_BOOT_PART_BYTES) != 0)
 		goto fail;
 
 	if (opt_emmc_dir_for_boot_copy)
@@ -1466,9 +1473,15 @@ static lv_res_t _on_btn_verify_base(lv_obj_t *btn)
 	}
 
 	u32 drift = 0U;
+	bool upgrade_legacy_pkg1 = false;
 	if (!_is_zero_bytes(vol.hdr.boot0_pkg1_sha256, 32U) &&
 	    memcmp(live.boot0_pkg1_sha256, vol.hdr.boot0_pkg1_sha256, 32U) != 0)
-		drift |= COW_NYX_DRIFT_BOOT0_PKG1;
+	{
+		if (memcmp(live.boot0_legacy_sha256, vol.hdr.boot0_pkg1_sha256, 32U) == 0)
+			upgrade_legacy_pkg1 = true;
+		else
+			drift |= COW_NYX_DRIFT_BOOT0_PKG1;
+	}
 	if (!_is_zero_bytes(vol.hdr.boot0_patrol_sha256_16, 16U) &&
 	    memcmp(live.boot0_patrol_sha256_16, vol.hdr.boot0_patrol_sha256_16, 16U) != 0)
 		drift |= COW_NYX_DRIFT_BOOT0_PATROL;
@@ -1490,6 +1503,13 @@ static lv_res_t _on_btn_verify_base(lv_obj_t *btn)
 
 	u32 hard_drift = drift & ~COW_NYX_DRIFT_BOOT0_PATROL;
 	vol.hdr.base_drift_part_mask = drift;
+	if (hard_drift == 0U && upgrade_legacy_pkg1)
+	{
+		memcpy(vol.hdr.boot0_pkg1_sha256, live.boot0_pkg1_sha256, 32U);
+		u64 new_gen = 0ULL;
+		if (_compute_unified_base_gen_id(&live, vol.hdr.base_hos_version, vol.hdr.base_pkg1_ver, &new_gen) == 0)
+			vol.hdr.base_gen_id = new_gen;
+	}
 	if (drift == 0U)
 	{
 		vol.hdr.flags &= ~(COW_NYX_FLAG_NEEDS_REBASE | COW_NYX_FLAG_FW_MISMATCH);

@@ -178,9 +178,31 @@ static char *_cow_strrchr(const char *s, int c)
 #define malloc(a)                            g_ops->fn_malloc((a))
 #define zalloc(a)                            g_ops->fn_zalloc((a))
 #define free(a)                              g_ops->fn_free((a))
+static void _cow_bso_ui_overlay_progress(const char *title, int cur_mb, int total_mb, int pct);
+
+static bool _cow_bso_ui_has_v2_ops(void)
+{
+	return g_ops && (g_ops->api_magic == COW_BSO_MAGIC_V2 || g_ops->api_magic == COW_BSO_MAGIC_V3);
+}
+
+static void _cow_bso_ui_backlight(void)
+{
+	if (g_ops && g_ops->api_magic == COW_BSO_MAGIC_V3 && g_ops->fn_gfx_backlight)
+		g_ops->fn_gfx_backlight();
+}
+
+static bool _cow_bso_ui_is_muted(void)
+{
+	if (!g_bdk || !g_bdk->gfx_con || !g_bdk->gfx_ctx)
+		return false;
+	const _cow_bdk_gfx_con_t *con = (const _cow_bdk_gfx_con_t *)g_bdk->gfx_con;
+	const _cow_bdk_gfx_ctxt_t *ctx = (const _cow_bdk_gfx_ctxt_t *)g_bdk->gfx_ctx;
+	return con->mute && ctx->fb != NULL && ctx->width == 720U && ctx->height == 1280U && ctx->stride >= 720U;
+}
+
 static void _cow_bso_ui_show(bool clr)
 {
-	if (g_ops && g_ops->api_magic == COW_BSO_MAGIC_V2 && g_ops->fn_gfx_show_console)
+	if (_cow_bso_ui_has_v2_ops() && g_ops->fn_gfx_show_console)
 	{
 		g_ops->fn_gfx_show_console(clr);
 		return;
@@ -206,7 +228,7 @@ static void _cow_bso_ui_show(bool clr)
 
 static void _cow_bso_ui_getpos(u32 *px, u32 *py)
 {
-	if (g_ops && g_ops->api_magic == COW_BSO_MAGIC_V2 && g_ops->fn_gfx_con_getpos)
+	if (_cow_bso_ui_has_v2_ops() && g_ops->fn_gfx_con_getpos)
 	{
 		g_ops->fn_gfx_con_getpos(px, py);
 		return;
@@ -224,7 +246,7 @@ static void _cow_bso_ui_getpos(u32 *px, u32 *py)
 
 static void _cow_bso_ui_setpos(u32 x, u32 y)
 {
-	if (g_ops && g_ops->api_magic == COW_BSO_MAGIC_V2 && g_ops->fn_gfx_con_setpos)
+	if (_cow_bso_ui_has_v2_ops() && g_ops->fn_gfx_con_setpos)
 	{
 		g_ops->fn_gfx_con_setpos(x, y);
 		return;
@@ -237,6 +259,8 @@ static void _cow_bso_ui_setpos(u32 x, u32 y)
 	}
 }
 
+#define cow_ui_is_muted()                    _cow_bso_ui_is_muted()
+#define cow_ui_overlay_progress(t, c, m, p)  _cow_bso_ui_overlay_progress((t), (c), (m), (p))
 #define cow_ui_show(clr)                     _cow_bso_ui_show((clr))
 #define cow_ui_getpos(px, py)                _cow_bso_ui_getpos((px), (py))
 #define cow_ui_setpos(x, y)                  _cow_bso_ui_setpos((x), (y))
@@ -293,6 +317,8 @@ static void _cow_bso_ui_setpos(u32 x, u32 y)
 #define COW_BOOT_PART_SECTORS        0x2000U
 #define COW_BOOT0_BCTSAVE_OFF        0xFC000U
 #define COW_BOOT0_BCTSAVE_LEN        0x4000U
+#define COW_BOOT0_PKG1_OFF           0x100000U
+#define COW_BOOT0_PKG1_LEN           0x80000U
 #define COW_BOOT0_PATROL_OFF         0x184000U
 #define COW_BOOT0_PATROL_LEN         0x200U
 #define COW_HASH_BUF_BYTES           0x800000U /* 8 MiB reusable buffer */
@@ -428,6 +454,7 @@ typedef struct _cow_autoinit_cfg_t
 typedef struct _cow_base_digests_t
 {
 	u8   boot0_pkg1_sha256[32];
+	u8   boot0_legacy_sha256[32];
 	u8   boot0_patrol_sha256_16[16];
 	u8   boot1_sha256[32];
 	u8   gpt_sha256[32];
@@ -1007,9 +1034,17 @@ static int _cow_read_and_hash_physical_base(cow_base_digests_t *out, bool copy_b
 			}
 			memcpy(out->boot0_patrol_sha256_16, patrol_full, sizeof(out->boot0_patrol_sha256_16));
 
+			/* Modchip-safe: hash Nintendo PKG1 [0x100000..0x180000) directly before legacy zeroing */
+			if (se_sha_hash_256_oneshot(out->boot0_pkg1_sha256, buf + COW_BOOT0_PKG1_OFF, COW_BOOT0_PKG1_LEN))
+			{
+				if (log_steps)
+					gfx_printf(" fail\n");
+				goto fail;
+			}
+
 			memset(buf + COW_BOOT0_BCTSAVE_OFF, 0, COW_BOOT0_BCTSAVE_LEN);
 			memset(buf + COW_BOOT0_PATROL_OFF, 0, COW_BOOT0_PATROL_LEN);
-			if (se_sha_hash_256_oneshot(out->boot0_pkg1_sha256, buf, COW_BOOT_PART_BYTES))
+			if (se_sha_hash_256_oneshot(out->boot0_legacy_sha256, buf, COW_BOOT_PART_BYTES))
 			{
 				if (log_steps)
 					gfx_printf(" fail\n");
@@ -1483,6 +1518,209 @@ static void _cow_format_u32(char *dst, u32 v)
 	dst[n] = 0;
 }
 
+static const u8 _cow_font8x8[95 * 8] = {
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /*   */
+	0x00, 0x30, 0x30, 0x18, 0x18, 0x00, 0x0C, 0x00, /* ! */
+	0x00, 0x22, 0x22, 0x22, 0x00, 0x00, 0x00, 0x00, /* " */
+	0x00, 0x66, 0x66, 0xFF, 0x66, 0xFF, 0x66, 0x66, /* # */
+	0x00, 0x18, 0x7C, 0x06, 0x3C, 0x60, 0x3E, 0x18, /* $ */
+	0x00, 0x46, 0x66, 0x30, 0x18, 0x0C, 0x66, 0x62, /* % */
+	0x00, 0x3C, 0x66, 0x3C, 0x1C, 0xE6, 0x66, 0xFC, /* & */
+	0x00, 0x18, 0x0C, 0x06, 0x00, 0x00, 0x00, 0x00, /* ' */
+	0x00, 0x30, 0x18, 0x0C, 0x0C, 0x18, 0x30, 0x00, /* ( */
+	0x00, 0x0C, 0x18, 0x30, 0x30, 0x18, 0x0C, 0x00, /* ) */
+	0x00, 0x66, 0x3C, 0xFF, 0x3C, 0x66, 0x00, 0x00, /* * */
+	0x00, 0x18, 0x18, 0x7E, 0x18, 0x18, 0x00, 0x00, /* + */
+	0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x0C, 0x00, /* , */
+	0x00, 0x00, 0x00, 0x3E, 0x00, 0x00, 0x00, 0x00, /* - */
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00, /* . */
+	0x00, 0x40, 0x60, 0x30, 0x18, 0x0C, 0x06, 0x00, /* / */
+	0x00, 0x3C, 0x66, 0x76, 0x6E, 0x66, 0x3C, 0x00, /* 0 */
+	0x00, 0x18, 0x1C, 0x18, 0x18, 0x18, 0x7E, 0x00, /* 1 */
+	0x00, 0x3C, 0x62, 0x30, 0x0C, 0x06, 0x7E, 0x00, /* 2 */
+	0x00, 0x3C, 0x62, 0x38, 0x60, 0x66, 0x3C, 0x00, /* 3 */
+	0x00, 0x6C, 0x6C, 0x66, 0xFE, 0x60, 0x60, 0x00, /* 4 */
+	0x00, 0x7E, 0x06, 0x7E, 0x60, 0x66, 0x3C, 0x00, /* 5 */
+	0x00, 0x3C, 0x06, 0x3E, 0x66, 0x66, 0x3C, 0x00, /* 6 */
+	0x00, 0x7E, 0x30, 0x30, 0x18, 0x18, 0x18, 0x00, /* 7 */
+	0x00, 0x3C, 0x66, 0x3C, 0x66, 0x66, 0x3C, 0x00, /* 8 */
+	0x00, 0x3C, 0x66, 0x7C, 0x60, 0x66, 0x3C, 0x00, /* 9 */
+	0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x18, 0x00, /* : */
+	0x00, 0x00, 0x18, 0x00, 0x18, 0x18, 0x0C, 0x00, /* ; */
+	0x00, 0x70, 0x1C, 0x06, 0x06, 0x1C, 0x70, 0x00, /* < */
+	0x00, 0x00, 0x3E, 0x00, 0x3E, 0x00, 0x00, 0x00, /* = */
+	0x00, 0x0E, 0x38, 0x60, 0x60, 0x38, 0x0E, 0x00, /* > */
+	0x00, 0x3C, 0x66, 0x30, 0x18, 0x00, 0x18, 0x00, /* ? */
+	0x00, 0x3C, 0x66, 0x76, 0x76, 0x06, 0x46, 0x3C, /* @ */
+	0x00, 0x3C, 0x66, 0x7E, 0x66, 0x66, 0x66, 0x00, /* A */
+	0x00, 0x3E, 0x66, 0x3E, 0x66, 0x66, 0x3E, 0x00, /* B */
+	0x00, 0x3C, 0x66, 0x06, 0x06, 0x66, 0x3C, 0x00, /* C */
+	0x00, 0x1E, 0x36, 0x66, 0x66, 0x36, 0x1E, 0x00, /* D */
+	0x00, 0x7E, 0x06, 0x1E, 0x06, 0x06, 0x7E, 0x00, /* E */
+	0x00, 0x3E, 0x06, 0x1E, 0x06, 0x06, 0x06, 0x00, /* F */
+	0x00, 0x3C, 0x66, 0x06, 0x76, 0x66, 0x3C, 0x00, /* G */
+	0x00, 0x66, 0x66, 0x7E, 0x66, 0x66, 0x66, 0x00, /* H */
+	0x00, 0x3C, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, /* I */
+	0x00, 0x78, 0x30, 0x30, 0x30, 0x36, 0x1C, 0x00, /* J */
+	0x00, 0x66, 0x36, 0x1E, 0x1E, 0x36, 0x66, 0x00, /* K */
+	0x00, 0x06, 0x06, 0x06, 0x06, 0x06, 0x7E, 0x00, /* L */
+	0x00, 0x46, 0x6E, 0x7E, 0x56, 0x46, 0x46, 0x00, /* M */
+	0x00, 0x66, 0x6E, 0x7E, 0x76, 0x66, 0x66, 0x00, /* N */
+	0x00, 0x3C, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x00, /* O */
+	0x00, 0x3E, 0x66, 0x3E, 0x06, 0x06, 0x06, 0x00, /* P */
+	0x00, 0x3C, 0x66, 0x66, 0x66, 0x3C, 0x70, 0x00, /* Q */
+	0x00, 0x3E, 0x66, 0x3E, 0x1E, 0x36, 0x66, 0x00, /* R */
+	0x00, 0x3C, 0x66, 0x0C, 0x30, 0x66, 0x3C, 0x00, /* S */
+	0x00, 0x7E, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00, /* T */
+	0x00, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x00, /* U */
+	0x00, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x18, 0x00, /* V */
+	0x00, 0x46, 0x46, 0x56, 0x7E, 0x6E, 0x46, 0x00, /* W */
+	0x00, 0x66, 0x3C, 0x18, 0x3C, 0x66, 0x66, 0x00, /* X */
+	0x00, 0x66, 0x66, 0x3C, 0x18, 0x18, 0x18, 0x00, /* Y */
+	0x00, 0x7E, 0x30, 0x18, 0x0C, 0x06, 0x7E, 0x00, /* Z */
+	0x00, 0x3C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3C, /* [ */
+	0x00, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x40, 0x00, /* \ */
+	0x00, 0x3C, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3C, /* ] */
+	0x00, 0x18, 0x3C, 0x66, 0x00, 0x00, 0x00, 0x00, /* ^ */
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, /* _ */
+	0x00, 0x0C, 0x18, 0x30, 0x00, 0x00, 0x00, 0x00, /* ` */
+	0x00, 0x00, 0x3C, 0x60, 0x7C, 0x66, 0x7C, 0x00, /* a */
+	0x00, 0x06, 0x06, 0x3E, 0x66, 0x66, 0x3E, 0x00, /* b */
+	0x00, 0x00, 0x3C, 0x06, 0x06, 0x06, 0x3C, 0x00, /* c */
+	0x00, 0x60, 0x60, 0x7C, 0x66, 0x66, 0x7C, 0x00, /* d */
+	0x00, 0x00, 0x3C, 0x66, 0x7E, 0x06, 0x3C, 0x00, /* e */
+	0x00, 0x38, 0x0C, 0x3E, 0x0C, 0x0C, 0x0C, 0x00, /* f */
+	0x00, 0x00, 0x7C, 0x66, 0x7C, 0x40, 0x3C, 0x00, /* g */
+	0x00, 0x06, 0x06, 0x3E, 0x66, 0x66, 0x66, 0x00, /* h */
+	0x00, 0x18, 0x00, 0x1C, 0x18, 0x18, 0x3C, 0x00, /* i */
+	0x00, 0x30, 0x00, 0x30, 0x30, 0x30, 0x1E, 0x00, /* j */
+	0x00, 0x06, 0x06, 0x36, 0x1E, 0x36, 0x66, 0x00, /* k */
+	0x00, 0x1C, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, /* l */
+	0x00, 0x00, 0x66, 0xFE, 0xFE, 0xD6, 0xC6, 0x00, /* m */
+	0x00, 0x00, 0x3E, 0x66, 0x66, 0x66, 0x66, 0x00, /* n */
+	0x00, 0x00, 0x3C, 0x66, 0x66, 0x66, 0x3C, 0x00, /* o */
+	0x00, 0x00, 0x3E, 0x66, 0x66, 0x3E, 0x06, 0x00, /* p */
+	0x00, 0x00, 0x7C, 0x66, 0x66, 0x7C, 0x60, 0x00, /* q */
+	0x00, 0x00, 0x3E, 0x66, 0x06, 0x06, 0x06, 0x00, /* r */
+	0x00, 0x00, 0x7C, 0x06, 0x3C, 0x60, 0x3E, 0x00, /* s */
+	0x00, 0x18, 0x7E, 0x18, 0x18, 0x18, 0x70, 0x00, /* t */
+	0x00, 0x00, 0x66, 0x66, 0x66, 0x66, 0x7C, 0x00, /* u */
+	0x00, 0x00, 0x66, 0x66, 0x66, 0x3C, 0x18, 0x00, /* v */
+	0x00, 0x00, 0xC6, 0xD6, 0xFE, 0x7C, 0x6C, 0x00, /* w */
+	0x00, 0x00, 0x66, 0x3C, 0x18, 0x3C, 0x66, 0x00, /* x */
+	0x00, 0x00, 0x66, 0x66, 0x7C, 0x60, 0x3C, 0x00, /* y */
+	0x00, 0x00, 0x7E, 0x30, 0x18, 0x0C, 0x7E, 0x00, /* z */
+	0x00, 0x18, 0x08, 0x08, 0x04, 0x08, 0x08, 0x18, /* { */
+	0x00, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, /* | */
+	0x00, 0x0C, 0x08, 0x08, 0x10, 0x08, 0x08, 0x0C, /* } */
+	0x00, 0x00, 0x00, 0x4C, 0x32, 0x00, 0x00, 0x00  /* ~ */
+};
+
+static void _cow_fb_put_px_land(u32 *fb, u32 fb_h, u32 stride, u32 lx, u32 ly, u32 color)
+{
+	/* Landscape (1280x720) -> Switch portrait Window A (720x1280):
+	 * lx in [0..1279] left->right maps to fb_y = (fb_h - 1) - lx,
+	 * ly in [0..719]  top->bottom maps to fb_x = ly. */
+	fb[ly + ((fb_h - 1U) - lx) * stride] = color;
+}
+
+static void _cow_fb_fill_rect_land(u32 *fb, u32 fb_h, u32 stride, u32 lx, u32 ly, u32 w, u32 h, u32 color)
+{
+	for (u32 y = ly; y < ly + h; y++)
+	{
+		for (u32 x = lx; x < lx + w; x++)
+			_cow_fb_put_px_land(fb, fb_h, stride, x, y, color);
+	}
+}
+
+static void _cow_fb_draw_str_land(u32 *fb, u32 fb_h, u32 stride, u32 lx, u32 ly, const char *s, u32 fg, u32 bg)
+{
+	u32 cx = lx;
+	for (; s && *s; s++)
+	{
+		char c = *s;
+		if (c < 32 || c > 126)
+			c = ' ';
+		const u8 *glyph = &_cow_font8x8[(u32)(c - 32) * 8U];
+		for (u32 row = 0U; row < 8U; row++)
+		{
+			u8 bits = glyph[row];
+			for (u32 col = 0U; col < 8U; col++)
+			{
+				u32 px_clr = (bits & (1U << col)) ? fg : bg;
+				u32 px = cx + (col * 2U);
+				u32 py = ly + (row * 2U);
+				_cow_fb_put_px_land(fb, fb_h, stride, px,      py,      px_clr);
+				_cow_fb_put_px_land(fb, fb_h, stride, px + 1U, py,      px_clr);
+				_cow_fb_put_px_land(fb, fb_h, stride, px,      py + 1U, px_clr);
+				_cow_fb_put_px_land(fb, fb_h, stride, px + 1U, py + 1U, px_clr);
+			}
+		}
+		cx += 16U;
+	}
+}
+
+static void _cow_fb_draw_bootlogo_overlay(
+	u32 *fb,
+	u32 fb_w,
+	u32 fb_h,
+	u32 stride,
+	const char *title,
+	int cur_mb,
+	int total_mb,
+	int pct)
+{
+	if (!fb || fb_w < 720U || fb_h < 1280U || stride < 720U)
+		return;
+
+	u32 p = (pct < 0) ? 0U : ((pct > 100) ? 100U : (u32)pct);
+
+	/* Draw centered status card below the Hekate bootlogo (ly=326..393) and above ticker (ly=718..719) */
+	_cow_fb_fill_rect_land(fb, fb_h, stride, 300U, 496U, 680U, 90U, 0xFF3A3A3AU);
+	_cow_fb_fill_rect_land(fb, fb_h, stride, 301U, 497U, 678U, 88U, 0xFF1B1B1BU);
+
+	const char *ttl = (title && *title) ? title : "cowMMC";
+	u32 tlen = (u32)strlen(ttl);
+	if (tlen > 40U)
+		tlen = 40U;
+	u32 tx = 300U + ((680U - (tlen * 16U)) / 2U);
+	_cow_fb_draw_str_land(fb, fb_h, stride, tx, 510U, ttl, COW_CLR_DEF, 0xFF1B1B1BU);
+
+	_cow_fb_fill_rect_land(fb, fb_h, stride, 340U, 536U, 600U, 12U, 0xFF555555U);
+	_cow_fb_fill_rect_land(fb, fb_h, stride, 341U, 537U, 598U, 10U, 0xFF2E2E2EU);
+	u32 fw = (598U * p) / 100U;
+	if (fw > 0U)
+		_cow_fb_fill_rect_land(fb, fb_h, stride, 341U, 537U, fw, 10U, COW_CLR_CYAN);
+
+	char line[64];
+	char num[16];
+	u32 cm = (cur_mb < 0) ? 0U : (u32)cur_mb;
+	u32 tm = (total_mb < 1) ? 1U : (u32)total_mb;
+	_cow_format_u32(line, cm);
+	strcat(line, " / ");
+	_cow_format_u32(num, tm);
+	strcat(line, num);
+	strcat(line, " MiB (");
+	_cow_format_u32(num, p);
+	strcat(line, num);
+	strcat(line, "%)");
+	u32 llen = (u32)strlen(line);
+	u32 px_w = llen * 16U;
+	u32 sx = (px_w < 680U) ? (300U + ((680U - px_w) / 2U)) : 316U;
+	_cow_fb_draw_str_land(fb, fb_h, stride, sx, 556U, line, COW_CLR_DEF, 0xFF1B1B1BU);
+}
+
+#ifdef COW_BSO_MODULE
+static void _cow_bso_ui_overlay_progress(const char *title, int cur_mb, int total_mb, int pct)
+{
+	if (!g_bdk || !g_bdk->gfx_ctx)
+		return;
+	_cow_bdk_gfx_ctxt_t *ctx = (_cow_bdk_gfx_ctxt_t *)g_bdk->gfx_ctx;
+	_cow_bso_ui_backlight();
+	_cow_fb_draw_bootlogo_overlay(ctx->fb, ctx->width, ctx->height, ctx->stride, title, cur_mb, total_mb, pct);
+}
+#endif
+
 static int _cow_write_text_file(const char *path, const char *text)
 {
 	FIL fp;
@@ -1738,7 +1976,8 @@ static int _cow_snapshot_transfer(
 	u64 payload_bytes,
 	bool to_archive,
 	u32 *out_crc32,
-	const char *progress_label)
+	const char *progress_label,
+	bool bootlogo_overlay)
 {
 	u32 buf_sz = COW_SNAP_IO_BUF_BYTES;
 	u8 *buf = (u8 *)malloc(buf_sz);
@@ -1756,7 +1995,8 @@ static int _cow_snapshot_transfer(
 		total_mb = 1;
 	u32 px = 0U, py = 0U;
 	u64 next_log = 0ULL;
-	if (ui)
+	u64 log_step = bootlogo_overlay ? (2ULL * 1024ULL * 1024ULL) : (4ULL * 1024ULL * 1024ULL);
+	if (ui && !bootlogo_overlay)
 		cow_ui_getpos(&px, &py);
 
 	u64 part_off = abs_off;
@@ -1796,9 +2036,16 @@ static int _cow_snapshot_transfer(
 			{
 				int cur_mb = (int)(done >> 20);
 				int pct = (int)((done * 100ULL) / payload_bytes);
-				cow_ui_setpos(px, py);
-				gfx_printf("%s%4d / %d MiB (%3d%%)", progress_label, cur_mb, total_mb, pct);
-				next_log += 4ULL * 1024ULL * 1024ULL;
+				if (bootlogo_overlay)
+				{
+					cow_ui_overlay_progress(progress_label, cur_mb, total_mb, pct);
+				}
+				else
+				{
+					cow_ui_setpos(px, py);
+					gfx_printf("%s%4d / %d MiB (%3d%%)", progress_label, cur_mb, total_mb, pct);
+				}
+				next_log += log_step;
 			}
 
 			u64 rem = payload_bytes - done;
@@ -1839,7 +2086,12 @@ static int _cow_snapshot_transfer(
 
 	if (ui)
 	{
-		if (rc == 0)
+		if (bootlogo_overlay)
+		{
+			if (rc == 0)
+				cow_ui_overlay_progress(progress_label, total_mb, total_mb, 100);
+		}
+		else if (rc == 0)
 		{
 			cow_ui_setpos(px, py);
 			gfx_printf("%s%4d / %d MiB (100%%)\n", progress_label, total_mb, total_mb);
@@ -1922,7 +2174,8 @@ static int _cow_save_raw_snapshot(
 	if (f_write(&fp, &shdr, sizeof(shdr), &bw) != FR_OK || bw != sizeof(shdr))
 		goto fail;
 
-	if (payload_bytes >= COW_SNAP_UI_THRESH_BYTES)
+	bool use_overlay = (payload_bytes >= COW_SNAP_UI_THRESH_BYTES) && cow_ui_is_muted();
+	if (payload_bytes >= COW_SNAP_UI_THRESH_BYTES && !use_overlay)
 	{
 		cow_ui_show(false);
 		gfx_printf("%kcowMMC: saving LKG snapshot...%k\n", COW_CLR_CYAN, COW_CLR_DEF);
@@ -1931,7 +2184,9 @@ static int _cow_save_raw_snapshot(
 	u64 prefix_bytes = (u64)hdr->prefix_sectors * COW_SECTOR_SIZE;
 	u32 pcrc = 0U;
 	if (_cow_snapshot_transfer(&fp, emmc_dir, part_sizes, num_parts, prefix_bytes,
-	                           payload_bytes, false, &pcrc, "      Save:    "))
+	                           payload_bytes, false, &pcrc,
+	                           use_overlay ? "cowMMC: Saving LKG snapshot" : "      Save:    ",
+	                           use_overlay))
 		goto fail;
 
 	shdr.magic                 = COW_RAW_SNAP_MAGIC;
@@ -2012,9 +2267,88 @@ static int _cow_restore_raw_snapshot(
 	u64 prefix_bytes = (u64)shdr.prefix_sectors * COW_SECTOR_SIZE;
 	u64 payload_bytes = (u64)shdr.next_free_slot * COW_BLOCK_BYTES;
 	int rc = _cow_snapshot_transfer(&fp, emmc_dir, part_sizes, num_parts, prefix_bytes,
-	                                payload_bytes, true, NULL, "      Restore: ");
+	                                payload_bytes, true, NULL, "      Restore: ", false);
 	f_close(&fp);
 	return rc;
+}
+
+static void _cow_quarantine_themes_preboot(const char *base_path)
+{
+	static const char *const k_theme_tids[5] = {
+		"0100000000001000",
+		"0100000000001007",
+		"0100000000001013",
+		"010000000000100B",
+		"0100000000000811",
+	};
+
+	size_t pfx_len = 0U;
+	if (base_path)
+	{
+		for (const char *p = base_path; *p; p++)
+		{
+			if ((p == base_path || p[-1] == '/') &&
+			    p[0] == 'e' && p[1] == 'm' && p[2] == 'u' &&
+			    p[3] == 'M' && p[4] == 'M' && p[5] == 'C' && p[6] == '/')
+			{
+				pfx_len = (size_t)(p - base_path);
+				break;
+			}
+		}
+	}
+	if (pfx_len > 0x180U)
+		return;
+
+	char sd_pfx[0x190];
+	if (pfx_len > 0U)
+		memcpy(sd_pfx, base_path, pfx_len);
+	sd_pfx[pfx_len] = 0;
+
+	char q_root[0x240];
+	_cow_join_path(q_root, sd_pfx, "config/cowmmc/quarantined_themes");
+
+	u32 moved = 0U;
+	for (u32 i = 0U; i < 5U; i++)
+	{
+		char src[0x240], dst[0x240];
+		_cow_join_path(src, sd_pfx, "atmosphere/contents/");
+		strcat(src, k_theme_tids[i]);
+		if (f_stat(src, NULL) != FR_OK)
+			continue;
+
+		_cow_mkdir_p(q_root);
+		_cow_join_path(dst, q_root, "/");
+		strcat(dst, k_theme_tids[i]);
+
+		if (f_stat(dst, NULL) == FR_OK)
+		{
+			f_unlink(dst);
+			if (f_stat(dst, NULL) == FR_OK)
+			{
+				char stale[0x260];
+				_cow_join_path(stale, dst, "_old");
+				if (f_stat(stale, NULL) == FR_OK)
+				{
+					for (u32 n = 1U; n <= 15U; n++)
+					{
+						char num[16];
+						_cow_format_u32(num, n);
+						_cow_join_path(stale, dst, "_old");
+						strcat(stale, num);
+						if (f_stat(stale, NULL) != FR_OK)
+							break;
+					}
+				}
+				f_rename(dst, stale);
+			}
+		}
+
+		if (f_rename(src, dst) == FR_OK)
+			moved++;
+	}
+
+	if (moved > 0U)
+		gfx_printf("      Quarantined %d theme dir(s).\n", (int)moved);
 }
 
 __attribute__((noinline))
@@ -2026,7 +2360,8 @@ static int _cow_rebaseline_overlay(
 	u32 *io_active_slot,
 	cow_header_t *io_hdr,
 	u32 *l1_table,
-	u32 active_l1_entries)
+	u32 active_l1_entries,
+	bool quarantine_themes)
 {
 	const u32 chunk_sectors = 1024U; /* 512 KiB buffer */
 	u8 *buf = (u8 *)malloc(chunk_sectors * COW_SECTOR_SIZE);
@@ -2155,6 +2490,9 @@ static int _cow_rebaseline_overlay(
 		return 1;
 	*io_active_slot = slot_b;
 
+	if (quarantine_themes)
+		_cow_quarantine_themes_preboot(base_path);
+
 	char p[0x240];
 	_cow_join_path(p, base_path, "/boot_pending");              f_unlink(p);
 	_cow_join_path(p, base_path, "/boot_ok");                   f_unlink(p);
@@ -2229,6 +2567,9 @@ static int _cow_preboot_check_and_grow_impl(const char *base_path, cow_rt_mount_
 
 	bool need_sb_commit = false;
 	bool rebaseline_now = (hdr.flags & COW_FLAG_FW_MISMATCH) != 0U;
+	bool quarantine_themes = rebaseline_now &&
+		((hdr.base_drift_part_mask & (COW_DRIFT_BOOT0_PKG1 | COW_DRIFT_BOOT1 | COW_DRIFT_BCPKG2)) != 0U ||
+		 hdr.base_drift_part_mask == 0U);
 
 	/* Phase 2 physical sysMMC SHA-256 verification */
 	bool chk_pkg1   = !_cow_is_zero(hdr.boot0_pkg1_sha256, 32U);
@@ -2250,8 +2591,14 @@ static int _cow_preboot_check_and_grow_impl(const char *base_path, cow_rt_mount_
 		}
 
 		u32 hard_drift = 0U;
+		bool upgrade_legacy_pkg1 = false;
 		if (chk_pkg1 && memcmp(cur.boot0_pkg1_sha256, hdr.boot0_pkg1_sha256, 32U))
-			hard_drift |= COW_DRIFT_BOOT0_PKG1;
+		{
+			if (memcmp(cur.boot0_legacy_sha256, hdr.boot0_pkg1_sha256, 32U) == 0)
+				upgrade_legacy_pkg1 = true;
+			else
+				hard_drift |= COW_DRIFT_BOOT0_PKG1;
+		}
 		if (chk_boot1 && memcmp(cur.boot1_sha256, hdr.boot1_sha256, 32U))
 			hard_drift |= COW_DRIFT_BOOT1;
 		if (chk_gpt && (!cur.gpt_valid || memcmp(cur.gpt_sha256, hdr.gpt_sha256, 32U)))
@@ -2270,6 +2617,8 @@ static int _cow_preboot_check_and_grow_impl(const char *base_path, cow_rt_mount_
 			if (cfg.auto_reset_on_drift)
 			{
 				rebaseline_now = true;
+				if ((hard_drift & (COW_DRIFT_BOOT0_PKG1 | COW_DRIFT_BOOT1 | COW_DRIFT_BCPKG2)) != 0U)
+					quarantine_themes = true;
 			}
 			else
 			{
@@ -2279,21 +2628,35 @@ static int _cow_preboot_check_and_grow_impl(const char *base_path, cow_rt_mount_
 				u32 next_slot = active_slot ^ 1U;
 				_cow_commit_superblock(emmc_dir, part_sizes, num_parts, next_slot, &hdr, l1_table);
 				free(l1_table);
-				EPRINTFARGS("sysNAND changed (drift=0x%08X)!\nMount blocked.", hdr.base_drift_part_mask);
+				EPRINTFARGS("sysNAND changed (drift=0x%08X)!\nMount blocked. Re-baseline in Nyx\ncowMMC (Exp) or enable auto_reset.", hdr.base_drift_part_mask);
 				return 1;
 			}
 		}
-		else if (patrol_changed)
+		else
 		{
-			u32 new_mask = hdr.base_drift_part_mask | COW_DRIFT_BOOT0_PATROL;
-			u32 new_flags = hdr.flags | (cfg.strict_patrol ? COW_FLAG_NEEDS_REBASE : 0U);
-			if (new_mask != hdr.base_drift_part_mask || new_flags != hdr.flags)
+			if (upgrade_legacy_pkg1)
 			{
-				hdr.base_drift_part_mask = new_mask;
-				hdr.flags = new_flags;
+				memcpy(hdr.boot0_pkg1_sha256, cur.boot0_pkg1_sha256, 32U);
+				u64 new_gen = 0ULL;
+				if (_cow_compute_base_gen_id(&cur, hdr.base_hos_version, hdr.base_pkg1_ver, &new_gen) == 0)
+				{
+					hdr.base_gen_id = new_gen;
+					hdr.last_verified_base_gen_id = new_gen;
+				}
 				need_sb_commit = true;
 			}
-			WPRINTF("cowMMC: BOOT0 Patrol changed\n(non-fatal).");
+			if (patrol_changed)
+			{
+				u32 new_mask = hdr.base_drift_part_mask | COW_DRIFT_BOOT0_PATROL;
+				u32 new_flags = hdr.flags | (cfg.strict_patrol ? COW_FLAG_NEEDS_REBASE : 0U);
+				if (new_mask != hdr.base_drift_part_mask || new_flags != hdr.flags)
+				{
+					hdr.base_drift_part_mask = new_mask;
+					hdr.flags = new_flags;
+					need_sb_commit = true;
+				}
+				WPRINTF("cowMMC: BOOT0 Patrol changed\n(non-fatal).");
+			}
 		}
 	}
 
@@ -2303,7 +2666,7 @@ static int _cow_preboot_check_and_grow_impl(const char *base_path, cow_rt_mount_
 		gfx_printf("%kcowMMC: sysNAND drift detected!%k\nAuto-rebaselining overlay...\n",
 			COW_CLR_CYAN, COW_CLR_DEF);
 		if (_cow_rebaseline_overlay(base_path, emmc_dir, part_sizes, num_parts,
-		                            &active_slot, &hdr, l1_table, active_l1_entries))
+		                            &active_slot, &hdr, l1_table, active_l1_entries, quarantine_themes))
 		{
 			free(l1_table);
 			EPRINTF("cowMMC: Auto-rebaseline failed!");
@@ -2879,10 +3242,15 @@ static int _cow_autoinit(const char *base_path, const char *cfg_path, u32 emu_id
 	{
 		_cow_write_text_file(
 			fpath,
-			"auto_reset_on_drift=1\n"
-			"auto_snapshot=1\n"
-			"auto_rollback=1\n"
-			"rollback_threshold=2\n");
+			cfg.auto_reset_on_drift
+				? "auto_reset_on_drift=1\n"
+				  "auto_snapshot=1\n"
+				  "auto_rollback=1\n"
+				  "rollback_threshold=2\n"
+				: "auto_reset_on_drift=0\n"
+				  "auto_snapshot=1\n"
+				  "auto_rollback=1\n"
+				  "rollback_threshold=2\n");
 	}
 
 	if (f_stat("emuMMC/emummc.ini", NULL) != FR_OK)
@@ -3058,7 +3426,7 @@ static int _cow_read_gpp_entry(u32 sector, u32 num_sectors, void *buf)
 
 static int _cow_run_init(cow_bso_ctx_t *ctx)
 {
-	if (!ctx || (ctx->api_magic != COW_BSO_MAGIC && ctx->api_magic != COW_BSO_MAGIC_V2))
+	if (!ctx || (ctx->api_magic != COW_BSO_MAGIC && ctx->api_magic != COW_BSO_MAGIC_V2 && ctx->api_magic != COW_BSO_MAGIC_V3))
 		return 1;
 
 	g_ops = ctx;
@@ -3117,7 +3485,7 @@ void cow_entry(void *moduleConfig, bdk_params_t *bp)
 {
 	cow_bso_ctx_t *ctx = (cow_bso_ctx_t *)moduleConfig;
 	g_bdk = bp;
-	if (!ctx || (ctx->api_magic != COW_BSO_MAGIC && ctx->api_magic != COW_BSO_MAGIC_V2))
+	if (!ctx || (ctx->api_magic != COW_BSO_MAGIC && ctx->api_magic != COW_BSO_MAGIC_V2 && ctx->api_magic != COW_BSO_MAGIC_V3))
 		return;
 
 	ctx->fn_run_init = _cow_run_init;
